@@ -1,0 +1,21 @@
+services:
+  bunny-chat:
+    build: .
+    ports:
+      - "8001:8000"
+    environment:
+      BUNNY_API: https://cutebunny.io
+      HWID_SALT: change-me   # must be the same value as in Bunny Interactive
+      SECRET_KEY: change-me-too
+      AUTOWIPE_HOURS: 48   # no login/message for this long: wipe the chat and delete .bunnyc (0 = off)
+      # GIPHY_API_KEY: <your key>   # enables the GIF picker (free key from developers.giphy.com)
+      # KLIPY_API_KEY: <your key>   # optional second GIF source; set either, both or none (users pick in Settings)
+      # GIPHY_RATING: pg-13         # g, pg, pg-13 or r (applies to both GIF sources)
+      # VAPID_SUBJECT: mailto:you@example.com  # optional, contact shown to push services
+      # REMEMBER_KEY: <Fernet key>  # optional; otherwise a key is generated in the data volume
+    volumes:
+      - bunny-chat-data:/data
+    restart: unless-stopped
+
+volumes:
+  bunny-chat-data:
