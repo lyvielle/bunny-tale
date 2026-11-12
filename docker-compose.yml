@@ -2,7 +2,7 @@ services:
   bunny-chat:
     build: .
     ports:
-      - "8001:8000"
+      - "${BIND_ADDR:-0.0.0.0}:${HOST_PORT:-8001}:8000"  # BIND_ADDR / HOST_PORT: set in the shell or a .env file next to this file
     environment:
       BUNNY_API: https://cutebunny.io
       HWID_SALT: change-me   # must be the same value as in Bunny Interactive

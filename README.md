@@ -51,9 +51,18 @@ cd bunny-tale
 docker compose up -d --build
 ```
 
-The app listens on port 8000 in the container (8001 in the compose file). Put it behind a reverse proxy with HTTPS: service worker, microphone access, push and "install app" all require a secure context. For SSE, disable proxy buffering and allow long-lived responses.
+The app listens on port 8000 inside the container. Compose publishes it as `${BIND_ADDR}:${HOST_PORT}`; both are read by Compose itself (from the shell or a `.env` file next to `docker-compose.yml`), not passed into the container:
 
-### Configuration (environment variables)
+| Variable | Default | Purpose |
+|---|---|---|
+| `BIND_ADDR` | `0.0.0.0` | Host address to bind. Use `127.0.0.1` when a reverse proxy on the same host is the only client |
+| `HOST_PORT` | `8001` | Host port to publish |
+
+Example `.env`: `BIND_ADDR=127.0.0.1` and `HOST_PORT=8001`.
+
+Put it behind a reverse proxy with HTTPS: service worker, microphone access, push and "install app" all require a secure context. For SSE, disable proxy buffering and allow long-lived responses.
+
+### Application configuration (container environment)
 
 | Variable | Default | Purpose |
 |---|---|---|
