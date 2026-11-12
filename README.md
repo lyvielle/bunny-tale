@@ -2,7 +2,7 @@
 
 > **Disclaimer:** Due to ongoing health issues I am no longer able to concentrate on developing software by myself. This project is therefore **vibe-coded**: written together with an AI assistant (Claude) and directed, tested and run by me. It is not a demo or proof of concept. It exists because I need it: it fixes a real problem in my day-to-day life and is in daily use. Read the code and the security notes below with that in mind.
 
-A small, self-hosted, end-to-end-encrypted group chat in a single room, built as a PWA. It runs on top of an existing **Bunny** file server (cutebunny.io): users sign in with their Bunny account, encryption keys and attachments live on that server, and this app only keeps encrypted rows in SQLite.
+A small, self-hosted group chat in a single room, built as a PWA, with messages encrypted at rest. It runs on top of an existing **Bunny** file server (cutebunny.io): users sign in with their Bunny account, encryption keys and attachments live on that server, and this app only keeps encrypted rows in SQLite.
 
 It is the sibling of *Bunny Interactive* (the file-manager web client) and shares its login conventions, dark theme and hardware-ID scheme. It does not modify or depend on Interactive's code.
 
@@ -82,6 +82,7 @@ The app listens on port 8000 in the container (8001 in the compose file). Put it
 
 ## Security notes
 
+- **Not end-to-end encrypted.** The server decrypts messages to serve them; encryption protects the stored data (SQLite) and nothing more. Transport security is HTTPS, provided by your reverse proxy.
 - This is a hobby project for a small trusted group, not an audited messenger. There is no forward secrecy and no per-user keys: everyone with a valid Bunny login can read the room.
 - Whoever controls the Bunny server can read `.bunnyc` and the attachments.
 - Link previews are fetched server-side with SSRF protection (public addresses only, size and time limits); previews of images go through an in-memory proxy.
