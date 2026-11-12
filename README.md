@@ -59,7 +59,9 @@ The app listens on port 8000 inside the container. Compose publishes it on the h
 |---|---|---|
 | `BIND_ADDR` | `0.0.0.0` | Host address to bind. Use `127.0.0.1` when a reverse proxy on the same host is the only client |
 | `HOST_PORT` | `8001` | Host port to publish |
-| `DATA_MOUNT` | `bunny-chat-data` | What is mounted at `/data` (SQLite, keys): a named Docker volume, or an absolute host path such as `/srv/bunny-tale` for a bind mount |
+| `DATA_DIR` | `bunny-chat-data` | Host-side location of the persistent data (SQLite, keys), mounted at `/data`: a named Docker volume, or an absolute host path such as `/srv/bunny-tale` for a bind mount |
+
+Convention: variables ending in `_DIR` are host-side mount locations read by Compose only; the paths inside the container are fixed and not configurable.
 
 Put it behind a reverse proxy with HTTPS: service worker, microphone access, push and "install app" all require a secure context. For SSE, disable proxy buffering and allow long-lived responses.
 
@@ -76,7 +78,6 @@ Put it behind a reverse proxy with HTTPS: service worker, microphone access, pus
 | `GIPHY_RATING` | `pg-13` | `g`, `pg`, `pg-13` or `r` (both GIF sources) |
 | `VAPID_SUBJECT` | `BUNNY_API` | Contact shown to push services |
 | `REMEMBER_KEY` | generated | Fernet key for "stay signed in" |
-| `DATA_DIR` | `/data` | SQLite, VAPID keys; fixed inside the container; see `DATA_MOUNT` for where it is stored on the host |
 | `VERIFY_TLS` | `1` | `0` disables TLS verification towards the Bunny server |
 | `JANITOR_SECONDS` | `300` | Interval of the cleanup/auto-wipe check |
 | `SSE_MAX_AGE` | `300` | Live streams are renewed this often (seconds) |

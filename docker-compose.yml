@@ -18,7 +18,7 @@ services:
       JANITOR_SECONDS: ${JANITOR_SECONDS:-300}
       SSE_MAX_AGE: ${SSE_MAX_AGE:-300}
     volumes:
-      - ${DATA_MOUNT:-bunny-chat-data}:/data  # a volume name, or an absolute host path for a bind mount
+      - ${DATA_DIR:-bunny-chat-data}:/data  # host side: a volume name, or an absolute host path (bind mount); the container path is fixed
     restart: unless-stopped
 
 volumes:
