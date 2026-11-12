@@ -2,17 +2,21 @@ services:
   bunny-chat:
     build: .
     ports:
-      - "${BIND_ADDR:-0.0.0.0}:${HOST_PORT:-8001}:8000"  # BIND_ADDR / HOST_PORT: set in the shell or a .env file next to this file
+      - "${BIND_ADDR:-0.0.0.0}:${HOST_PORT:-8001}:8000"
+    # Every value comes from the environment (shell, CI/CD variables or a .env file next to this file).
     environment:
-      BUNNY_API: https://cutebunny.io
-      HWID_SALT: change-me   # must be the same value as in Bunny Interactive
-      SECRET_KEY: change-me-too
-      AUTOWIPE_HOURS: 48   # no login/message for this long: wipe the chat and delete .bunnyc (0 = off)
-      # GIPHY_API_KEY: <your key>   # enables the GIF picker (free key from developers.giphy.com)
-      # KLIPY_API_KEY: <your key>   # optional second GIF source; set either, both or none (users pick in Settings)
-      # GIPHY_RATING: pg-13         # g, pg, pg-13 or r (applies to both GIF sources)
-      # VAPID_SUBJECT: mailto:you@example.com  # optional, contact shown to push services
-      # REMEMBER_KEY: <Fernet key>  # optional; otherwise a key is generated in the data volume
+      BUNNY_API: ${BUNNY_API:-https://cutebunny.io}
+      HWID_SALT: ${HWID_SALT:?set HWID_SALT (same value as Bunny Interactive)}
+      SECRET_KEY: ${SECRET_KEY:?set SECRET_KEY (any long random string)}
+      AUTOWIPE_HOURS: ${AUTOWIPE_HOURS:-48}
+      GIPHY_API_KEY: ${GIPHY_API_KEY:-}
+      KLIPY_API_KEY: ${KLIPY_API_KEY:-}
+      GIPHY_RATING: ${GIPHY_RATING:-pg-13}
+      VAPID_SUBJECT: ${VAPID_SUBJECT:-${BUNNY_API:-https://cutebunny.io}}
+      REMEMBER_KEY: ${REMEMBER_KEY:-}
+      VERIFY_TLS: ${VERIFY_TLS:-1}
+      JANITOR_SECONDS: ${JANITOR_SECONDS:-300}
+      SSE_MAX_AGE: ${SSE_MAX_AGE:-300}
     volumes:
       - bunny-chat-data:/data
     restart: unless-stopped

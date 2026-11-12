@@ -44,38 +44,38 @@ It is the sibling of *Bunny Interactive* (the file-manager web client) and share
 
 ## Deployment
 
+Everything is configured through **environment variables**; `docker-compose.yml` needs no editing. Variables come from the shell, your CI/CD settings or a `.env` file next to the compose file (`.env` is git-ignored). `HWID_SALT` and `SECRET_KEY` are required: Compose refuses to start without them.
+
 ```bash
 git clone https://github.com/lyvielle/bunny-tale
 cd bunny-tale
-# edit docker-compose.yml: set HWID_SALT and SECRET_KEY
+printf 'HWID_SALT=...\nSECRET_KEY=...\n' > .env
 docker compose up -d --build
 ```
 
-The app listens on port 8000 inside the container. Compose publishes it as `${BIND_ADDR}:${HOST_PORT}`; both are read by Compose itself (from the shell or a `.env` file next to `docker-compose.yml`), not passed into the container:
+The app listens on port 8000 inside the container. Compose publishes it on the host as `BIND_ADDR:HOST_PORT`:
 
 | Variable | Default | Purpose |
 |---|---|---|
 | `BIND_ADDR` | `0.0.0.0` | Host address to bind. Use `127.0.0.1` when a reverse proxy on the same host is the only client |
 | `HOST_PORT` | `8001` | Host port to publish |
 
-Example `.env`: `BIND_ADDR=127.0.0.1` and `HOST_PORT=8001`.
-
 Put it behind a reverse proxy with HTTPS: service worker, microphone access, push and "install app" all require a secure context. For SSE, disable proxy buffering and allow long-lived responses.
 
-### Application configuration (container environment)
+### Application configuration (all passed through by `docker-compose.yml`)
 
 | Variable | Default | Purpose |
 |---|---|---|
 | `BUNNY_API` | `https://cutebunny.io` | Bunny server base URL |
-| `HWID_SALT` | `change-me` | Hardware-ID salt; **must equal Bunny Interactive's** |
-| `SECRET_KEY` | random per start | Flask session signing key; set it, or everyone is logged out on restart |
+| `HWID_SALT` | **required** | Hardware-ID salt; **must equal Bunny Interactive's** |
+| `SECRET_KEY` | **required** | Flask session signing key; keep it stable, or everyone is logged out on restart |
 | `AUTOWIPE_HOURS` | `48` | Wipe after this long without activity (`0` = off) |
 | `GIPHY_API_KEY` | – | Enables GIPHY in the GIF picker |
 | `KLIPY_API_KEY` | – | Enables Klipy; set either, both or none |
 | `GIPHY_RATING` | `pg-13` | `g`, `pg`, `pg-13` or `r` (both GIF sources) |
 | `VAPID_SUBJECT` | `BUNNY_API` | Contact shown to push services |
 | `REMEMBER_KEY` | generated | Fernet key for "stay signed in" |
-| `DATA_DIR` | `/data` | SQLite, VAPID keys; mount a volume here |
+| `DATA_DIR` | `/data` | SQLite, VAPID keys; backed by the `bunny-chat-data` volume (fixed in the compose file) |
 | `VERIFY_TLS` | `1` | `0` disables TLS verification towards the Bunny server |
 | `JANITOR_SECONDS` | `300` | Interval of the cleanup/auto-wipe check |
 | `SSE_MAX_AGE` | `300` | Live streams are renewed this often (seconds) |
