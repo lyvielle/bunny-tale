@@ -961,6 +961,7 @@ ICONS = {
     "bunny": '<ellipse cx="8.6" cy="6" rx="2.2" ry="4.2"/><ellipse cx="15.4" cy="6" rx="2.2" ry="4.2"/><ellipse cx="12" cy="15" rx="6.5" ry="5.5"/><path d="M9.5 14.5h.01M14.5 14.5h.01"/><path d="M10.8 17.4q1.2 1 2.4 0"/>',
     "trash": '<path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><path d="M10 11v6M14 11v6"/>',
     "x": '<path d="M18 6 6 18M6 6l12 12"/>',
+    "image": '<rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="m21 15-5-5L5 21"/>',
     "mic": '<rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v4"/>',
     "stop": '<rect x="6" y="6" width="12" height="12" rx="2" fill="currentColor"/>',
     "clip": '<path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48"/>',
@@ -1169,9 +1170,10 @@ CHAT = """<header class=bar>""" + BRAND + """<div class=rt><span id=st class=st 
 <div id=gifg class=gifg><div id=gifin class=gifin></div><div id=gifmsg class=gds></div></div><div class=gpw id=gpw></div></div>
 <div id=lockmsg class=lockmsg hidden>Chat wiped. You can write again in <b id=lockn>5</b>s</div>
 <div id=rbar class=rbar hidden></div><div id=recbar class=recbar hidden></div><div id=pend class=pend hidden></div>
-<form id=cform onsubmit="return false"><input type=file id=file multiple hidden>
+<form id=cform onsubmit="return false"><input type=file id=file multiple hidden><input type=file id=media accept="image/*,video/*" multiple hidden>
 <button type=button id=attach class="btn ghost" title=Attach><svg viewBox="0 0 24 24">{{I.clip|safe}}</svg></button>
-<div id=amenu class=amenu hidden><button type=button id=mfile><svg viewBox="0 0 24 24">{{I.clip|safe}}</svg>Attach file</button>
+<div id=amenu class=amenu hidden><button type=button id=mmedia><svg viewBox="0 0 24 24">{{I.image|safe}}</svg>Attach media</button>
+<button type=button id=mfile><svg viewBox="0 0 24 24">{{I.clip|safe}}</svg>Attach file</button>
 <button type=button id=mgif><span class=gb>GIF</span>Send a GIF</button>
 <button type=button id=mrec><svg viewBox="0 0 24 24">{{I.mic|safe}}</svg>Record voice</button></div>
 <textarea id=ta rows=1 maxlength=4000 placeholder="Message" autocomplete=off></textarea>
@@ -1181,7 +1183,7 @@ CHAT = """<header class=bar>""" + BRAND + """<div class=rt><span id=st class=st 
 
 CHAT_JS = r"""(()=>{
 const $=s=>document.querySelector(s);
-const scroller=$('#scroll'),msgs=$('#msgs'),ta=$('#ta'),sendb=$('#sendb'),attachb=$('#attach'),pendEl=$('#pend'),older=$('#older'),pill=$('#pill'),st=$('#st'),fileIn=$('#file'),empty=$('#empty'),rbar=$('#rbar'),lockEl=$('#lockmsg'),lockN=$('#lockn');
+const scroller=$('#scroll'),msgs=$('#msgs'),ta=$('#ta'),sendb=$('#sendb'),attachb=$('#attach'),pendEl=$('#pend'),older=$('#older'),pill=$('#pill'),st=$('#st'),fileIn=$('#file'),mediaIn=$('#media'),empty=$('#empty'),rbar=$('#rbar'),lockEl=$('#lockmsg'),lockN=$('#lockn');
 const ME=window.ME,IC=window.IC,JH={'Content-Type':'application/json'};
 const amenu=$('#amenu'),gifp=$('#gifp'),gifq=$('#gifq'),gifg=$('#gifg'),gifin=$('#gifin'),gifmsg=$('#gifmsg'),GS=ME.gif||{},GPS=['giphy','klipy'].filter(p=>GS[p]),GP=GPS.length>0;
 const rows=new Map();
@@ -1710,12 +1712,14 @@ ta.addEventListener('keydown',e=>{
 ta.addEventListener('paste',e=>{const fs=[...(e.clipboardData&&e.clipboardData.files||[])];if(fs.length){e.preventDefault();addFiles(fs)}});
 const CANREC=!!(window.MediaRecorder&&navigator.mediaDevices&&navigator.mediaDevices.getUserMedia);
 $('#mgif').hidden=!GP;$('#mrec').hidden=!CANREC;
-attachb.onclick=()=>{if(GP||CANREC)amenu.hidden=!amenu.hidden;else fileIn.click()}; // with GIFs or voice available the button opens a small menu
+attachb.onclick=()=>{amenu.hidden=!amenu.hidden}; // small menu: media (gallery), file, GIF, voice
 $('#mrec').onclick=()=>{amenu.hidden=true;recStart()};
 $('#mfile').onclick=()=>{amenu.hidden=true;fileIn.click()};
+$('#mmedia').onclick=()=>{amenu.hidden=true;mediaIn.click()};
 document.addEventListener('click',e=>{if(!e.target.closest('#amenu,#attach'))amenu.hidden=true});
 addEventListener('keydown',e=>{if(e.key==='Escape')amenu.hidden=true});
 fileIn.onchange=()=>{addFiles(fileIn.files);fileIn.value=''};
+mediaIn.onchange=()=>{addFiles(mediaIn.files);mediaIn.value=''};
 const hasFiles=e=>e.dataTransfer&&[...e.dataTransfer.types].includes('Files');
 addEventListener('dragover',e=>{if(hasFiles(e)){e.preventDefault();document.body.classList.add('drag')}});
 addEventListener('dragleave',e=>{if(!e.relatedTarget)document.body.classList.remove('drag')});
