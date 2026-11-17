@@ -16,6 +16,7 @@ It is the sibling of *Bunny Interactive* (the file-manager web client) and share
 - Edit your own messages (button, or long-press on mobile); edited messages are marked
 - Offline-tolerant sending: on a poor connection messages are queued, shown as pending, and sent when the connection returns
 - Replies (also by swiping), hearts, delete own messages, nicknames, link previews and tap-to-load embeds
+- Message sound while the app is open (per-device switch in Settings)
 - Opt-in web push notifications (own VAPID / RFC 8291 implementation, no third-party SDK)
 - "Wipe chat" for any user, automatic wipe after inactivity
 - Optional fake "502 Bad Gateway" screen, opened by tapping its icon three times
@@ -96,6 +97,7 @@ Put it behind a reverse proxy with HTTPS: service worker, microphone access, pus
 | Path | Content |
 |---|---|
 | `app.py` | The whole application: Flask routes, crypto, push, HTML/CSS/JS templates, service worker |
+| `sounds/` | `notification.wav`, the message sound (optional; without it the setting is hidden) |
 | `icons/` | PWA icons (`icon-192.png`, `icon-512.png`, `icon-maskable.png`, `favicon.ico`) |
 | `Dockerfile`, `docker-compose.yml` | Container build and example deployment |
 | `requirements.txt` | Flask, requests, gunicorn, cryptography |

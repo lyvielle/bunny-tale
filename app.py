@@ -1016,7 +1016,7 @@ background:radial-gradient(600px 300px at 50% -10%,#8b5cf633,transparent),var(--
 form{display:grid;gap:12px}
 .bar{display:flex;justify-content:space-between;align-items:center;max-width:880px;margin:0 auto;padding:20px 16px}
 .rt{display:flex;align-items:center;gap:10px}
-.st{width:8px;height:8px;border-radius:50%;background:#52525b;transition:.2s}.st.on{background:#34d399}
+.st{width:8px;height:8px;margin-right:4px;border-radius:50%;background:#52525b;transition:.2s}.st.on{background:#34d399}
 html{height:100%}
 body.chatpg{position:fixed;top:0;left:0;right:0;height:100vh;height:100dvh;overflow:hidden;display:flex;flex-direction:column}
 .chatpg .bar{flex:none;width:100%;padding:12px 16px}
@@ -1132,7 +1132,7 @@ body.drag #drop{display:grid}
 .lbx{position:absolute;top:calc(12px + env(safe-area-inset-top));right:12px;z-index:2;background:#000a}
 .modal{position:fixed;inset:0;background:#000b;display:grid;place-items:center;z-index:80;padding:16px}
 .mcard{width:100%;max-width:360px;background:var(--card);border:1px solid var(--line);border-radius:16px;padding:24px}
-.mcard.set{max-width:420px}.mcard.set h3{margin-bottom:8px}
+.mcard.set{max-width:420px;max-height:calc(100vh - 32px);max-height:calc(100dvh - 32px);overflow-y:auto;overscroll-behavior:contain}.mcard.set h3{margin-bottom:8px}
 .srow{display:flex;align-items:center;justify-content:space-between;gap:14px;padding:14px 0;border-top:1px solid var(--line)}
 .srow.first{border-top:0}.srow.col{display:grid;gap:8px}.srow .tx{display:grid;gap:2px;min-width:0}.srow b{font-weight:600}.srow .ds{color:var(--mute);font-size:13px}
 .nrow{display:flex;gap:8px}.nrow .btn{flex:none}
@@ -1471,6 +1471,23 @@ if(GP){
 }
 
 /* ---- link previews: cards from the server, players only after a tap ---- */
+/* ---- message sound (this device only; plays for messages from others while the app is open) ---- */
+const sndOn=()=>{try{return localStorage.getItem('bc_snd')!=='0'}catch(_){return true}};
+const ding=ME.sound?new Audio(ME.sound):null;let lastDing=0;
+if(ding){
+ ding.preload='auto';ding.volume=.45;
+ const unlock=()=>{ // browsers only allow sound after a first tap or key press
+  removeEventListener('pointerdown',unlock,true);removeEventListener('keydown',unlock,true);
+  ding.muted=true;const p=ding.play();
+  if(p&&p.then)p.then(()=>{ding.pause();ding.currentTime=0;ding.muted=false}).catch(()=>{ding.muted=false});else ding.muted=false;
+ };
+ addEventListener('pointerdown',unlock,true);addEventListener('keydown',unlock,true);
+}
+function playDing(force){
+ if(!ding||(!force&&(!sndOn()||Date.now()-lastDing<800)))return;
+ lastDing=Date.now();
+ try{ding.currentTime=0;const p=ding.play();if(p&&p.catch)p.catch(()=>{})}catch(_){}
+}
 const pvOn=()=>{try{return localStorage.getItem('bc_pv')!=='0'}catch(_){return true}};
 const pvCol=()=>{try{return localStorage.getItem('bc_pvc')==='1'}catch(_){return false}};
 const PVC=new Map(),pvQ=[];let pvActive=0;
@@ -2018,6 +2035,7 @@ function settings(){
  nr.appendChild(el('span','ds','Leave empty to use your default name.'));c.appendChild(nr);
  if(canPush)c.appendChild(switchRow('Notifications','Get notified about new messages while you are not looking at the chat.',pushOn,on=>pushSet(on)));
  else{const r=el('div','srow');const t=el('div','tx');t.appendChild(el('b','','Notifications'));t.appendChild(el('span','ds','Not available here. On iPhone, add the app to your home screen first.'));r.appendChild(t);c.appendChild(r)}
+ if(ding)c.appendChild(switchRow('Message sound','Play a sound when a message from someone else arrives while the app is open.',sndOn(),async on=>{try{localStorage.setItem('bc_snd',on?'1':'0')}catch(_){}if(on)playDing(true);return on}));
  c.appendChild(switchRow('Link previews','Show cards for links. The server fetches them for you; a player only loads, straight from its site, when you tap it.',pvOn(),async on=>{try{localStorage.setItem('bc_pv',on?'1':'0')}catch(_){}return on}));
  c.appendChild(switchRow('Auto-collapse embeds','Link cards start collapsed. Tap a card\'s header to open or close it.',pvCol(),async on=>{try{localStorage.setItem('bc_pvc',on?'1':'0')}catch(_){}return on}));
  if(GPS.length>1){
@@ -2051,7 +2069,7 @@ function connect(){
   if(ev.t==='ka')return;
   if(ev.t==='msg'){
    const near=stick;
-   if(add(ev.m)){if(near||ev.m.u===ME.uid)toBottom();else pill.hidden=false}
+   if(add(ev.m)){if(near||ev.m.u===ME.uid)toBottom();else pill.hidden=false;if(ev.m.u!==ME.uid)playDing()}
   }else if(ev.t==='del')remove(ev.id);
   else if(ev.t==='edit')applyEdit(ev.id,ev.x,ev.e);
   else if(ev.t==='heart'){const r=rows.get(ev.id);if(r){r._h=ev.h;paintHearts(r)}}
@@ -2286,6 +2304,13 @@ def appjs():
     return Response(CHAT_JS, mimetype="text/javascript", headers={"Cache-Control": "no-cache"})
 
 
+@app.route("/notification.wav")
+def notification_sound():
+    if not NOTIF:
+        return "", 404
+    return Response(NOTIF, mimetype="audio/wav", headers={"Cache-Control": "public, max-age=86400"})
+
+
 @app.route("/icon-<name>.png")
 def icon(name):
     data = {"192": ICON_192, "512": ICON_512, "maskable": ICON_MASK}.get(name)
@@ -2372,7 +2397,7 @@ def index():
     try:
         m = master()
         uid = uid_of(s["email"])
-        me = {"uid": uid, "name": nick_map(m).get(uid) or s["name"], "vapid": vapid()[1], "gate": gate_on(),
+        me = {"uid": uid, "name": nick_map(m).get(uid) or s["name"], "vapid": vapid()[1], "gate": gate_on(), "sound": SOUND_URL,
               "gif": {"giphy": {"key": GIPHY_KEY, "rating": GIPHY_RATING} if GIPHY_KEY else None,
                       "klipy": {"key": KLIPY_KEY, "rating": GIPHY_RATING} if KLIPY_KEY else None}}
     except AuthError:
@@ -2924,3 +2949,11 @@ def _icon(name):
 
 ICON_192, ICON_512, ICON_MASK, FAVICON = (_icon(n) for n in ("icon-192.png", "icon-512.png", "icon-maskable.png", "favicon.ico"))
 ICON_V = hashlib.sha1(ICON_192 + ICON_512 + ICON_MASK + FAVICON).hexdigest()[:8]  # changes whenever the icons change
+
+# --- message sound: sounds/notification.wav next to this file (optional; without it the setting is hidden) ---
+try:
+    with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "sounds", "notification.wav"), "rb") as f:
+        NOTIF = f.read()
+except OSError:
+    NOTIF = b""
+SOUND_URL = f"/notification.wav?v={hashlib.sha1(NOTIF).hexdigest()[:8]}" if NOTIF else None

@@ -4,6 +4,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY app.py ./
 COPY icons ./icons
+COPY sounds ./sounds
 RUN mkdir -p /data
 # single worker: sessions and live subscribers are kept in memory; every open chat tab holds one thread (SSE)
 CMD ["gunicorn", "-w", "1", "-k", "gthread", "--threads", "128", "-t", "0", "-b", "0.0.0.0:8000", "app:app"]
