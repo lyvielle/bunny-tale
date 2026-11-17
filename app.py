@@ -465,7 +465,7 @@ def open_row(m, row, nk):
     except (InvalidTag, ValueError):
         return None
     return {"id": id_, "ts": ts, "u": uid, "s": nk.get(uid) or p.get("s", ""), "t": p.get("t", ""),
-            "a": p.get("a", []), "r": p.get("r"), "g": p.get("g")}
+            "a": p.get("a", []), "r": p.get("r"), "g": p.get("g"), "e": p.get("e")}
 
 
 def quote_of(m, rid, nk):
@@ -506,6 +506,8 @@ init_db()
 SUBS = {}  # queue -> {uid, cid, visible}
 _slock = threading.Lock()
 WIPE_UNTIL = 0.0
+RECENT = OrderedDict()  # (uid, client id) -> the message created for it, so a retried send is answered, not repeated
+_send_lock = threading.Lock()
 
 
 def publish(ev):
@@ -962,6 +964,9 @@ ICONS = {
     "trash": '<path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><path d="M10 11v6M14 11v6"/>',
     "x": '<path d="M18 6 6 18M6 6l12 12"/>',
     "image": '<rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="m21 15-5-5L5 21"/>',
+    "search": '<circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/>',
+    "pencil": '<path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/>',
+    "clock": '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
     "mic": '<rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v4"/>',
     "stop": '<rect x="6" y="6" width="12" height="12" rx="2" fill="currentColor"/>',
     "clip": '<path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48"/>',
@@ -1079,6 +1084,15 @@ textarea:disabled{opacity:.45;cursor:not-allowed}
 .amenu{position:absolute;left:0;bottom:52px;z-index:6;display:grid;min-width:180px;padding:4px;background:var(--card);border:1px solid var(--line);border-radius:12px;box-shadow:0 10px 30px #000b}
 .amenu button{display:flex;align-items:center;gap:10px;padding:11px 12px;background:transparent;border:0;color:var(--text);font:inherit;border-radius:8px;cursor:pointer;text-align:left}
 .amenu button:hover{background:#27272a}.amenu svg{width:20px;height:20px}
+.srch{position:absolute;inset:0;z-index:7;background:var(--bg);display:flex;flex-direction:column}
+.srh{display:flex;gap:8px;width:100%;max-width:880px;margin:0 auto;padding:10px 16px}.srh .btn{flex:none}
+.sres{flex:1;min-height:0;overflow-y:auto;width:100%;max-width:880px;margin:0 auto;padding:0 16px 16px}
+.sr{display:block;width:100%;text-align:left;background:var(--card);border:1px solid var(--line);border-radius:12px;padding:9px 12px;margin:0 0 8px;color:var(--text);font:inherit;cursor:pointer}
+.sr:hover{border-color:#3f3f46}.sr .srt{display:flex;justify-content:space-between;gap:10px}.sr b{font-size:12px;color:#c4b5fd}.sr .sd{font-size:11px;color:var(--mute)}
+.sr .srx{overflow-wrap:anywhere;font-size:14px}.sr mark{background:#8b5cf666;color:inherit;border-radius:3px}
+.mrow.pending .bub{opacity:.72}.mrow.pending .meta svg{width:12px;height:12px}.mrow.pending .meta .del{background:transparent;border:0;color:inherit;padding:2px;cursor:pointer;display:inline-flex;border-radius:6px}
+.mrow.pending .ost.wait{text-decoration:underline;cursor:pointer}
+@media(pointer:coarse){.mrow.own .bub{-webkit-user-select:none;user-select:none;-webkit-touch-callout:none}} /* long-press edits your message instead of selecting its text */
 .recbar{display:flex;align-items:center;gap:10px;margin-bottom:8px;padding:8px 10px;background:#0c0c0e;border:1px solid var(--line);border-radius:12px}
 .recbar .rt{flex:1;min-width:0;font-variant-numeric:tabular-nums}.recbar audio{flex:1;min-width:0;height:36px}.recbar .btn{flex:none}
 .rdot{flex:none;width:10px;height:10px;border-radius:50%;background:#ef4444;animation:rp 1s infinite}@keyframes rp{50%{opacity:.25}}
@@ -1158,12 +1172,14 @@ OFFLINE = """<div class=card>""" + BRAND + """
 <button class=btn onclick=location.reload()>Retry</button></div>"""
 
 CHAT = """<header class=bar>""" + BRAND + """<div class=rt><span id=st class=st title=Live></span>
+<button id=srb class="btn ghost sm" title="Search"><svg viewBox="0 0 24 24">{{I.search|safe}}</svg></button>
 <button id=setb class="btn ghost sm" title="Settings"><svg viewBox="0 0 24 24">{{I.sliders|safe}}</svg></button>
 <button id=wipeb class="btn ghost sm danger" title="Wipe chat"><svg viewBox="0 0 24 24">{{I.trash|safe}}</svg></button>
 <a class="btn ghost sm" href=/logout>Logout</a></div></header>
 <div class=wrap><div class=scroll id=scroll><div class=inner>
 <button id=older class="btn ghost sm" hidden>Load older</button><div id=msgs></div><div id=empty class=empty hidden>No messages yet. Say hi!</div></div></div>
-<button id=pill class=btn hidden><svg viewBox="0 0 24 24">{{I.down|safe}}</svg>New messages</button></div>
+<button id=pill class=btn hidden><svg viewBox="0 0 24 24">{{I.down|safe}}</svg>New messages</button>
+<div id=srch class=srch hidden><div class=srh><input id=sq placeholder="Search messages" autocomplete=off maxlength=100 enterkeyhint=search><button type=button id=sx class="btn ghost sm" title=Close><svg viewBox="0 0 24 24">{{I.x|safe}}</svg></button></div><div id=sres class=sres></div></div></div>
 <div class=comp><div class=compin>
 <div id=gifp class=gifp hidden><div class=gifh><input id=gifq placeholder="Search GIPHY" autocomplete=off><button type=button id=gifx class="btn ghost sm" title=Close><svg viewBox="0 0 24 24">{{I.x|safe}}</svg></button></div>
 <div class=gift><button type=button id=tabr class=gt>Recent</button><button type=button id=tabt class=gt>Trending</button></div>
@@ -1187,6 +1203,7 @@ const scroller=$('#scroll'),msgs=$('#msgs'),ta=$('#ta'),sendb=$('#sendb'),attach
 const ME=window.ME,IC=window.IC,JH={'Content-Type':'application/json'};
 const amenu=$('#amenu'),gifp=$('#gifp'),gifq=$('#gifq'),gifg=$('#gifg'),gifin=$('#gifin'),gifmsg=$('#gifmsg'),GS=ME.gif||{},GPS=['giphy','klipy'].filter(p=>GS[p]),GP=GPS.length>0;
 const rows=new Map();
+let editing=null,draft='',outbox=[],flushing=false,flushTimer=0,flushWait=3000,lp={t:0,x:0,y:0,on:false};const pendRows=new Map();
 let oldest=0,stick=true,busy=false,opened=false,pend=[],reconnecting=false,reply=null,locked=false,lockTimer=null,es=null,lastEv=Date.now(),kbd=false,wasOpen=false;
 const vv=()=>window.visualViewport?visualViewport.height:innerHeight;
 let vvMax=vv(),vvW=innerWidth;
@@ -1297,7 +1314,7 @@ function quoteEl(q){
  const d=el('div','quote');d.dataset.q=q.id;
  if(q.gone){d.classList.add('gone');d.textContent='Message deleted';return d}
  const w=el('div','qwho',q.s);w.dataset.u=q.u;d.appendChild(w);d.appendChild(el('div','qtxt',snip(q)));
- d.onclick=()=>{const r=rows.get(q.id);if(r){r.scrollIntoView({block:'center',behavior:'smooth'});r.classList.add('flash');setTimeout(()=>r.classList.remove('flash'),1300)}};
+ d.onclick=()=>jumpTo(q.id);
  return d;
 }
 function paintHearts(row){
@@ -1432,16 +1449,10 @@ async function gLoad(reset){
  }catch(_){if(seq===gSeq){gShown='';gifmsg.textContent='Could not reach '+N+'.'}}
  finally{if(seq===gSeq)gBusy=false}
 }
-async function sendGif(g){
- if(locked||busy)return;busy=true;upd();
- try{
-  const r=await fetch('/send',{method:'POST',headers:JH,body:JSON.stringify({text:'',gif:g,reply:reply?reply.id:null,media:[]})});
-  if(r.status===401)return relogin();
-  if(r.status===409){setReply(null);return toast(await r.text())}
-  if(!r.ok)return toast(await r.text()||'Send failed');
-  const m=await r.json();recordGif(g);setReply(null);setGif(false);add(m);toBottom();
- }catch(_){toast('Send failed')}
- finally{busy=false;upd()}
+function sendGif(g){
+ if(locked)return;
+ enqueue({text:'',reply:reply?reply.id:null,q:reply?{s:reply.s,t:reply.t}:null,gif:g,media:[]});
+ setReply(null);setGif(false);
 }
 if(GP){
  gLabels();
@@ -1511,16 +1522,18 @@ function build(m){
  if(m.g&&gifOk(m.g))b.appendChild(gifEl(m.g));
  (m.a||[]).forEach(a=>b.appendChild(media(a)));
  if(m.t){const t=el('div','txt');linkify(t,m.t);b.appendChild(t);if(pvOn())urlsOf(m.t).forEach(u=>addPreview(b,u))}
- b.appendChild(el('div','meta',fmt(m.ts)));
+ b.appendChild(el('div','meta',(m.e?'edited · ':'')+fmt(m.ts)));
  const acts=el('div','acts');
  row._hb=actBtn('heart','Heart',()=>heart(m.id));acts.appendChild(row._hb);
  acts.appendChild(actBtn('reply','Reply',()=>setReply(m)));
+ if(own)acts.appendChild(actBtn('pencil','Edit',()=>startEdit(row._m)));
  if(own)acts.appendChild(actBtn('trash','Delete',()=>del(m.id)));
  b.appendChild(acts);
  row._hp=el('button','hp');row._hp.type='button';row._hp.onclick=e=>{e.stopPropagation();heart(m.id)};b.appendChild(row._hp);
  row.appendChild(b);paintHearts(row);return row;
 }
 function add(m){
+ if(m.c)dropOutCid(m.c); // the server has it: its waiting copy goes
  const have=rows.get(m.id);
  if(have){if(m.h){have._h=m.h;paintHearts(have)}return false}
  const e=build(m);rows.set(m.id,e);
@@ -1530,14 +1543,15 @@ function add(m){
  oldest=oldest?Math.min(oldest,m.id):m.id;empty.hidden=true;return true;
 }
 function remove(id){
+ if(editing&&editing.id===id)cancelEdit();
  const e=rows.get(id);if(e){e.remove();rows.delete(id)}
  document.querySelectorAll('.quote[data-q="'+id+'"]').forEach(q=>{q.classList.add('gone');q.onclick=null;q.textContent='Message deleted'});
  if(reply&&reply.id===id)setReply(null);
  empty.hidden=rows.size>0;
 }
-function clearAll(){rows.clear();msgs.textContent='';oldest=0;older.hidden=true;empty.hidden=false;setReply(null)}
-async function fetchPage(before){
- const r=await fetch('/messages'+(before?'?before='+before:''));
+function clearAll(){cancelEdit();rows.clear();msgs.textContent='';oldest=0;older.hidden=true;empty.hidden=false;setReply(null)}
+async function fetchPage(before,until){
+ const r=await fetch('/messages'+(before?'?before='+before+(until?'&until='+until:''):''));
  if(r.status===401){relogin();return null}
  if(!r.ok){toast(await r.text());return null}
  return r.json();
@@ -1594,11 +1608,18 @@ function swEnd(ok){
  if(ok&&s.hit&&s.row._m)setReply(s.row._m);
 }
 msgs.addEventListener('touchstart',e=>{
+ clearTimeout(lp.t);
  if(e.touches.length!==1||e.target.closest('video,audio,iframe,input,textarea,.acts,.pv,.gifm img,.att img')){sw=null;return}
  const row=e.target.closest('.mrow');if(!row){sw=null;return}
  const t=e.touches[0];sw={row,b:row.querySelector('.bub'),x:t.clientX,y:t.clientY,on:false,hit:false,i:null};
+ if(row.classList.contains('own')&&row._m&&!e.target.closest('a,button,.quote')){ // long-press on your own message: edit it
+  lp.x=t.clientX;lp.y=t.clientY;
+  lp.t=setTimeout(()=>{if(!sw||sw.on)return;sw=null;lp.on=true;setTimeout(()=>{lp.on=false},700);
+   getSelection().removeAllRanges();clearSel();if(navigator.vibrate)try{navigator.vibrate(15)}catch(_){}startEdit(row._m)},520);
+ }
 },{passive:true});
 msgs.addEventListener('touchmove',e=>{
+ if(lp.t&&e.touches[0]&&Math.hypot(e.touches[0].clientX-lp.x,e.touches[0].clientY-lp.y)>10)clearTimeout(lp.t);
  if(!sw)return;const t=e.touches[0],dx=t.clientX-sw.x,dy=t.clientY-sw.y;
  if(!sw.on){
   if(Math.abs(dy)>10&&Math.abs(dy)>Math.abs(dx)){sw=null;return}   // it is a scroll
@@ -1611,11 +1632,14 @@ msgs.addEventListener('touchmove',e=>{
  if(e.cancelable)e.preventDefault();
  swMove(t.clientX-sw.x);
 },{passive:false});
-msgs.addEventListener('touchend',()=>swEnd(true));
-msgs.addEventListener('touchcancel',()=>swEnd(false));
+msgs.addEventListener('touchend',()=>{clearTimeout(lp.t);swEnd(true)});
+msgs.addEventListener('touchcancel',()=>{clearTimeout(lp.t);swEnd(false)});
+msgs.addEventListener('contextmenu',e=>{if(coarse()&&e.target.closest('.mrow.own'))e.preventDefault()});
 let lastTap={id:0,t:0};
 msgs.addEventListener('click',e=>{
  const row=e.target.closest('.mrow');if(!row)return;
+ if(lp.on){lp.on=false;return}
+ if(row.classList.contains('pending'))return;
  if(e.target.closest('a,button,img,video,audio,.quote,.pv'))return;
  const id=+row.dataset.id,now=Date.now();
  if(lastTap.id===id&&now-lastTap.t<320){lastTap={id:0,t:0};getSelection().removeAllRanges();clearSel();heart(id);return}
@@ -1633,6 +1657,7 @@ function keep(){if(kbd&&!locked&&document.activeElement!==ta)ta.focus({preventSc
 
 /* ---- composer ---- */
 function setReply(m){
+ if(m&&editing)cancelEdit();
  reply=m?{id:m.id,s:m.s,t:snip(m.a&&m.a[0]?{t:m.t,k:m.a[0].k,n:m.a[0].n}:m.g?{t:m.t,k:'gif'}:{t:m.t})}:null;
  rbar.replaceChildren();rbar.hidden=!reply;
  if(reply){
@@ -1644,7 +1669,7 @@ function setReply(m){
 function upd(){
  pendEl.hidden=!pend.length;
  const up=pend.some(p=>!p.ref&&!p.err);
- sendb.disabled=locked||busy||up||!(ta.value.trim()||pend.some(p=>p.ref));
+ sendb.disabled=editing?(locked||busy||!(ta.value.trim()||editing.empty)):(locked||up||!(ta.value.trim()||pend.some(p=>p.ref)));
 }
 function resize(){ta.style.height='auto';ta.style.height=Math.min(ta.scrollHeight,140)+'px'}
 function lockInput(sec){
@@ -1684,29 +1709,22 @@ function addFiles(list){
  }
  upd();
 }
-async function send(){
- if(busy||sendb.disabled)return;
+function send(){
+ if(editing)return doEdit();
+ if(sendb.disabled)return;
  const text=ta.value.trim(),ready=pend.filter(p=>p.ref);
  const had=kbd||document.activeElement===ta&&!coarse(); // keyboard was open: keep it open
- if(had)ta.focus({preventScroll:true});
- busy=true;upd();
- try{
-  const r=await fetch('/send',{method:'POST',headers:JH,
-   body:JSON.stringify({text,reply:reply?reply.id:null,media:ready.map(p=>({ref:p.ref,name:p.name,size:p.size}))})});
-  if(r.status===401)return relogin();
-  if(r.status===409){setReply(null);return toast(await r.text())}
-  if(!r.ok)return toast(await r.text()||'Send failed');
-  const m=await r.json();
-  ta.value='';resize();setReply(null);
-  pend.forEach(p=>p.chip.remove());pend=[];
-  add(m);toBottom();
- }catch(_){toast('Send failed')}
- finally{busy=false;upd();if(!locked&&had)ta.focus({preventScroll:true})}
+ enqueue({text,reply:reply?reply.id:null,q:reply?{s:reply.s,t:reply.t}:null,gif:null,
+  media:ready.map(p=>({ref:p.ref,name:p.name,size:p.size}))});
+ ta.value='';resize();setReply(null);
+ pend.forEach(p=>p.chip.remove());pend=[];upd();
+ if(!locked&&had)ta.focus({preventScroll:true});
 }
 sendb.onclick=send;
 sendb.addEventListener('mousedown',e=>e.preventDefault()); // don't steal focus from the text field
 ta.addEventListener('input',()=>{resize();upd()});
 ta.addEventListener('keydown',e=>{
+ if(e.key==='Escape'&&editing){cancelEdit();return}
  if(e.key==='Enter'&&!e.shiftKey&&!e.isComposing&&!matchMedia('(pointer:coarse)').matches){e.preventDefault();send()}
 });
 ta.addEventListener('paste',e=>{const fs=[...(e.clipboardData&&e.clipboardData.files||[])];if(fs.length){e.preventDefault();addFiles(fs)}});
@@ -1826,6 +1844,158 @@ function recReview(R,blob,type){
 }
 const send_=()=>send();
 
+/* ---- search, jump to a message, edit, outbox ---- */
+const srch=$('#srch'),sq=$('#sq'),sres=$('#sres');let sTimer=0,sSeq=0,sBefore=0;
+function srOpen(open){
+ if(open)setGif(false);
+ srch.hidden=!open;
+ if(open)sq.focus();else{sq.value='';sres.replaceChildren();sSeq++}
+}
+function hl(node,text,q){
+ const i=text.toLowerCase().indexOf(q);
+ if(i<0){node.textContent=text;return}
+ node.append(text.slice(0,i));node.appendChild(el('mark','',text.slice(i,i+q.length)));node.append(text.slice(i+q.length));
+}
+async function srRun(more){
+ const q=sq.value.trim().toLowerCase();
+ if(q.length<2){sSeq++;sres.replaceChildren();return}
+ const seq=++sSeq;
+ if(!more){sBefore=0;sres.replaceChildren(el('div','gds','Searching…'))}
+ try{
+  const r=await fetch('/search?q='+encodeURIComponent(q)+(more&&sBefore?'&before='+sBefore:''));
+  if(seq!==sSeq)return;
+  if(r.status===401)return relogin();
+  if(!r.ok){sres.replaceChildren(el('div','gds','Search failed'));return}
+  const j=await r.json();if(seq!==sSeq)return;
+  if(more){const mb=sres.querySelector('.srmore');if(mb)mb.remove()}else sres.replaceChildren();
+  if(!j.res.length&&!more)sres.appendChild(el('div','gds','No messages found.'));
+  j.res.forEach(x=>{
+   const b=el('button','sr'),h=el('div','srt'),t=el('div','srx');b.type='button';
+   h.appendChild(el('b','',x.s));h.appendChild(el('span','sd',fmt(x.ts)));b.appendChild(h);
+   hl(t,x.t||snip(x),q);b.appendChild(t);
+   b.onclick=()=>{srOpen(false);jumpTo(x.id)};sres.appendChild(b);sBefore=x.id;
+  });
+  if(j.more){const b=el('button','btn ghost sm srmore','Load more');b.type='button';b.onclick=()=>srRun(true);sres.appendChild(b)}
+ }catch(_){if(seq===sSeq)sres.replaceChildren(el('div','gds','Could not reach the server.'))}
+}
+$('#srb').onclick=()=>srOpen(srch.hidden);$('#sx').onclick=()=>srOpen(false);
+sq.addEventListener('input',()=>{clearTimeout(sTimer);sTimer=setTimeout(()=>srRun(false),350)});
+sq.addEventListener('keydown',e=>{if(e.key==='Enter'){clearTimeout(sTimer);srRun(false)}});
+addEventListener('keydown',e=>{if(e.key==='Escape'&&!srch.hidden)srOpen(false)});
+addEventListener('keydown',e=>{if(e.key==='Escape'&&editing)cancelEdit()});
+
+async function jumpTo(id){ // scroll to a message; older ones that are not loaded yet are fetched first
+ let r=rows.get(id),smooth=!!r;
+ if(!r){
+  clearSel();
+  for(let n=0;!rows.has(id)&&oldest&&id<oldest&&n<20;n++){
+   const j=await fetchPage(oldest,id);if(!j)return;
+   const h=scroller.scrollHeight,t=scroller.scrollTop;
+   j.msgs.forEach(add);older.hidden=!j.more;
+   scroller.scrollTop=t+(scroller.scrollHeight-h);
+   if(!j.msgs.length)break;
+  }
+  r=rows.get(id);
+ }
+ if(!r){toast('That message no longer exists');return}
+ stick=false;
+ r.scrollIntoView({block:'center',behavior:smooth?'smooth':'auto'});
+ r.classList.add('flash');setTimeout(()=>r.classList.remove('flash'),1300);
+}
+
+const snipOf=m=>snip(m.a&&m.a[0]?{t:m.t,k:m.a[0].k,n:m.a[0].n}:m.g?{t:m.t,k:'gif'}:{t:m.t});
+function startEdit(m){
+ if(!m||locked)return;
+ if(pend.length){toast('Send or remove your attachments first');return}
+ if(editing)cancelEdit();
+ draft=ta.value;setReply(null);
+ editing={id:m.id,empty:!!((m.a&&m.a.length)||m.g)};
+ ta.value=m.t||'';resize();
+ const b=el('div','rbt'),x=el('button','del');x.type='button';x.appendChild(svg('x'));x.onclick=cancelEdit;
+ b.appendChild(el('b','','Editing message'));b.appendChild(el('span','',snipOf(m).slice(0,120)));
+ rbar.replaceChildren(b,x);rbar.hidden=false;
+ ta.focus();try{ta.setSelectionRange(ta.value.length,ta.value.length)}catch(_){}
+ upd();
+}
+function endEdit(){editing=null;ta.value=draft;draft='';resize();rbar.replaceChildren();rbar.hidden=true;upd()}
+function cancelEdit(){if(editing)endEdit()}
+async function doEdit(){
+ if(busy||sendb.disabled)return;
+ const ed=editing,text=ta.value.trim();busy=true;upd();
+ try{
+  const r=await fetch('/edit',{method:'POST',headers:JH,body:JSON.stringify({id:ed.id,text})});
+  if(r.status===401)return relogin();
+  if(!r.ok){toast(await r.text()||'Edit failed');if(r.status===404||r.status===403)cancelEdit();return}
+  const j=await r.json();
+  if(editing===ed)endEdit();
+  applyEdit(j.id,j.x,j.e);
+ }catch(_){toast('Could not save the edit. Check your connection.')}
+ finally{busy=false;upd()}
+}
+function applyEdit(id,t,e){
+ const row=rows.get(id);let m=null;
+ if(row){
+  m=row._m;m.t=t;m.e=e;m.h=row._h;
+  const n=build(m);row.replaceWith(n);rows.set(id,n);
+ }
+ const sn=m?snipOf(m).slice(0,140):t.slice(0,140);
+ document.querySelectorAll('.quote[data-q="'+id+'"] .qtxt').forEach(q=>{q.textContent=sn});
+}
+
+/* messages are queued here first and sent in order; they stay (also over a reload) until the server has them */
+const outSave=()=>{try{localStorage.setItem('bc_out',JSON.stringify(outbox))}catch(_){}};
+function outLoad(){try{const a=JSON.parse(localStorage.getItem('bc_out')||'[]');if(Array.isArray(a))outbox=a.filter(x=>x&&typeof x.cid==='string'&&!pendRows.has(x.cid))}catch(_){}}
+function showPending(it){
+ const row=el('div','mrow own pending'),b=el('div','bub');row.dataset.cid=it.cid;
+ if(it.q){const q=el('div','quote');q.appendChild(el('div','qwho',it.q.s));q.appendChild(el('div','qtxt',it.q.t));b.appendChild(q)}
+ if(it.gif&&gifOk(it.gif))b.appendChild(gifEl(it.gif));
+ (it.media||[]).forEach(a=>{const c=el('div','fchip');c.appendChild(svg('file'));c.appendChild(el('span','nm',a.name));b.appendChild(c)});
+ if(it.text){const t=el('div','txt');linkify(t,it.text);b.appendChild(t)}
+ const meta=el('div','meta'),st=el('span','ost','Sending…'),x=el('button','del');
+ x.type='button';x.title='Cancel';x.appendChild(svg('x'));x.onclick=()=>cancelOut(it.cid);
+ st.onclick=()=>{if(st.classList.contains('wait')){flushWait=3000;flush()}};
+ meta.appendChild(svg('clock'));meta.appendChild(st);meta.appendChild(x);b.appendChild(meta);
+ row.appendChild(b);row._st=st;msgs.appendChild(row);pendRows.set(it.cid,row);empty.hidden=true;
+}
+function setOutState(it,text,wait){const r=pendRows.get(it.cid);if(r&&r._st){r._st.textContent=text;r._st.classList.toggle('wait',!!wait)}}
+function dropOutCid(cid){
+ const i=outbox.findIndex(x=>x.cid===cid);if(i>=0){outbox.splice(i,1);outSave()}
+ const r=pendRows.get(cid);if(r){r.remove();pendRows.delete(cid)}
+}
+function cancelOut(cid){
+ const it=outbox.find(x=>x.cid===cid);if(!it)return;
+ if(it.fl){toast('It is being sent right now');return}
+ (it.media||[]).forEach(a=>fetch('/media/discard',{method:'POST',headers:JH,body:JSON.stringify({ref:a.ref})}).catch(()=>{}));
+ dropOutCid(cid);
+}
+function enqueue(it){
+ it.cid=[...crypto.getRandomValues(new Uint8Array(10))].map(x=>x.toString(16).padStart(2,'0')).join('');
+ outbox.push(it);outSave();showPending(it);toBottom();flush();
+}
+async function flush(){
+ if(flushing)return;flushing=true;clearTimeout(flushTimer);
+ try{
+  while(outbox.length){
+   const it=outbox[0];setOutState(it,'Sending…');it.fl=true;
+   let r=null,bad=false;const ctl=new AbortController(),tm=setTimeout(()=>ctl.abort(),20000);
+   try{r=await fetch('/send',{method:'POST',headers:JH,signal:ctl.signal,
+    body:JSON.stringify({text:it.text,cid:it.cid,reply:it.reply||null,gif:it.gif||undefined,media:it.media||[]})})}catch(_){bad=true}
+   clearTimeout(tm);it.fl=false;
+   if(bad||r.status>=500||r.status===423||r.status===429||r.status===408){ // no answer or server busy: keep it, try again
+    setOutState(it,navigator.onLine?'Not sent yet. Tap to retry':'Waiting for connection. Tap to retry',true);
+    flushTimer=setTimeout(flush,flushWait);flushWait=Math.min(flushWait*2,30000);return;
+   }
+   if(r.status===401){relogin();return}
+   if(r.status===409&&it.reply){it.reply=null;it.q=null;outSave();continue} // what it replies to is gone: send it as a plain message
+   if(!r.ok){toast((await r.text())||'A message could not be sent');dropOutCid(it.cid);continue}
+   const m=await r.json();flushWait=3000;
+   dropOutCid(it.cid);
+   if(it.gif)recordGif(it.gif);
+   add(m);toBottom();
+  }
+ }finally{flushing=false}
+}
+
 /* ---- settings ---- */
 function switchRow(title,desc,checked,change,first){
  const r=el('div','srow'+(first?' first':'')),t=el('div','tx'),lab=el('label','sw'),i=el('input'),k=el('i');
@@ -1873,7 +2043,7 @@ function connect(){
  if(es){es.onopen=es.onmessage=es.onerror=null;es.close()}
  const me=es=new EventSource('/events?cid='+cid+'&v='+(document.hidden?0:1));
  lastEv=Date.now();
- me.onopen=()=>{lastEv=Date.now();st.classList.add('on');reconnecting=false;if(opened)sync();opened=true};
+ me.onopen=()=>{lastEv=Date.now();st.classList.add('on');reconnecting=false;if(opened)sync();opened=true;flushWait=3000;flush()};
  me.onmessage=e=>{
   lastEv=Date.now();st.classList.add('on');
   let ev;try{ev=JSON.parse(e.data)}catch(_){return}
@@ -1882,6 +2052,7 @@ function connect(){
    const near=stick;
    if(add(ev.m)){if(near||ev.m.u===ME.uid)toBottom();else pill.hidden=false}
   }else if(ev.t==='del')remove(ev.id);
+  else if(ev.t==='edit')applyEdit(ev.id,ev.x,ev.e);
   else if(ev.t==='heart'){const r=rows.get(ev.id);if(r){r._h=ev.h;paintHearts(r)}}
   else if(ev.t==='wipe'){clearAll();lockInput(ev.lock||5)}
   else if(ev.t==='nick'){document.querySelectorAll('.who,.qwho').forEach(w=>{if(w.dataset.u===ev.u)w.textContent=ev.s});if(ev.u===ME.uid)ME.name=ev.s}
@@ -1895,7 +2066,7 @@ function connect(){
 /* a stream that went quiet (sleeping phone, network change, proxy) is replaced and the chat re-synced */
 const stale=()=>Date.now()-lastEv>40000;
 setInterval(()=>{if(opened&&stale()){st.classList.remove('on');connect()}},10000);
-const wake=()=>{if(opened){if(stale())connect();sync()}};
+const wake=()=>{if(opened){if(stale())connect();sync();flushWait=3000;flush()}};
 addEventListener('online',wake);addEventListener('pageshow',wake);
 document.addEventListener('visibilitychange',()=>{
  fetch('/presence',{method:'POST',headers:JH,keepalive:true,body:JSON.stringify({cid,visible:!document.hidden})}).catch(()=>{});
@@ -1929,6 +2100,7 @@ if(ME.gate){
  const j=await fetchPage();if(!j)return;
  j.msgs.forEach(add);older.hidden=!j.more;empty.hidden=rows.size>0;
  toBottom();upd();connect();pushRefresh();
+ outLoad();outbox.forEach(showPending);if(outbox.length){toBottom();flush()}
  if(j.lock>0)lockInput(j.lock);
  takeShared();
 })();
@@ -2217,18 +2389,28 @@ def messages():
         return "", 401
     limit = 50
     before = request.args.get("before", type=int)
+    until = request.args.get("until", type=int)  # with before: everything from this id up to before, in one go (jump to a message)
     try:
         m = master()
     except Exception as e:
         return fail(e)
     with conn() as c:
-        if before:
-            rows = c.execute(f"SELECT {COLS} FROM messages WHERE id<? ORDER BY id DESC LIMIT ?",
-                             (before, limit + 1)).fetchall()
+        if before and until and until < before:
+            limit = 1500
+            rows = c.execute(f"SELECT {COLS} FROM messages WHERE id<? AND id>=? ORDER BY id DESC LIMIT ?",
+                             (before, until, limit + 1)).fetchall()
+            low = rows[min(len(rows), limit) - 1][0] if rows else until
+            more = c.execute("SELECT 1 FROM messages WHERE id<? LIMIT 1", (low,)).fetchone() is not None
+            rows = rows[:limit]
         else:
-            rows = c.execute(f"SELECT {COLS} FROM messages ORDER BY id DESC LIMIT ?", (limit + 1,)).fetchall()
-    more = len(rows) > limit
-    out = decode_rows(m, rows[:limit], nick_map(m))
+            if before:
+                rows = c.execute(f"SELECT {COLS} FROM messages WHERE id<? ORDER BY id DESC LIMIT ?",
+                                 (before, limit + 1)).fetchall()
+            else:
+                rows = c.execute(f"SELECT {COLS} FROM messages ORDER BY id DESC LIMIT ?", (limit + 1,)).fetchall()
+            more = len(rows) > limit
+            rows = rows[:limit]
+    out = decode_rows(m, rows, nick_map(m))
     out.reverse()
     return jsonify({"msgs": out, "more": more, "lock": max(0.0, round(WIPE_UNTIL - time.time(), 1))})
 
@@ -2273,6 +2455,8 @@ def send():
     rid = j.get("reply")
     if rid is not None and (not isinstance(rid, int) or isinstance(rid, bool)):
         return "Bad request", 400
+    cid = j.get("cid")  # client-made id of a queued message: a retry after a lost answer must not post it twice
+    cid = cid if isinstance(cid, str) and re.fullmatch(r"[A-Za-z0-9_\-]{8,40}", cid) else None
     try:
         m = master()
         uid = uid_of(s["email"])
@@ -2283,28 +2467,114 @@ def send():
     payload = {"s": name, "t": text, "a": atts}
     if gif:
         payload["g"] = gif
-    if rid:
+    with _send_lock:
+        if cid and (uid, cid) in RECENT:
+            return jsonify(RECENT[(uid, cid)])
+        if rid:
+            with conn() as c:
+                if not c.execute("SELECT 1 FROM messages WHERE id=?", (rid,)).fetchone():
+                    return "The message you replied to was deleted", 409
+            payload["r"] = rid
+        mk = os.urandom(32)  # this message's own key; it lives only in this row
+        ts = int(time.time() * 1000)
         with conn() as c:
-            if not c.execute("SELECT 1 FROM messages WHERE id=?", (rid,)).fetchone():
-                return "The message you replied to was deleted", 409
-        payload["r"] = rid
-    mk = os.urandom(32)  # this message's own key; it lives only in this row
-    ts = int(time.time() * 1000)
-    with conn() as c:
-        for a in atts:
-            if c.execute("SELECT 1 FROM media WHERE ref=?", (a["r"],)).fetchone():
-                return "Attachment already used", 400
-        cur = c.execute("INSERT INTO messages(ts,uid,mkey,body) VALUES(?,?,?,?)",
-                        (ts, uid, seal(m, mk), seal(m, seal(mk, json.dumps(payload).encode()))))
-        mid = cur.lastrowid
-        c.executemany("INSERT INTO media VALUES(?,?)", [(a["r"], mid) for a in atts])
-    ev = {"id": mid, "ts": ts, "u": uid, "s": name, "t": text, "a": atts, "h": [], "g": gif}
-    if rid:
-        ev["q"] = quote_of(m, rid, nk)
+            for a in atts:
+                if c.execute("SELECT 1 FROM media WHERE ref=?", (a["r"],)).fetchone():
+                    return "Attachment already used", 400
+            cur = c.execute("INSERT INTO messages(ts,uid,mkey,body) VALUES(?,?,?,?)",
+                            (ts, uid, seal(m, mk), seal(m, seal(mk, json.dumps(payload).encode()))))
+            mid = cur.lastrowid
+            c.executemany("INSERT INTO media VALUES(?,?)", [(a["r"], mid) for a in atts])
+        ev = {"id": mid, "ts": ts, "u": uid, "s": name, "t": text, "a": atts, "h": [], "g": gif}
+        if rid:
+            ev["q"] = quote_of(m, rid, nk)
+        if cid:
+            ev["c"] = cid
+            RECENT[(uid, cid)] = ev
+            while len(RECENT) > 500:
+                RECENT.popitem(last=False)
     touch_activity()
     publish({"t": "msg", "m": ev})
     PUSHPOOL.submit(notify, uid, name, atts, text, bool(gif))
     return jsonify(ev)
+
+
+@app.route("/edit", methods=["POST"])
+def edit():  # change the text of your own message (the same message key is kept, the body is re-sealed)
+    s = auth()
+    if not s:
+        return "", 401
+    j = request.get_json(silent=True) or {}
+    mid, text = j.get("id"), str(j.get("text") or "").strip()
+    if not isinstance(mid, int) or isinstance(mid, bool):
+        return "Bad request", 400
+    if len(text) > MAX_TEXT:
+        return f"Message too long (max {MAX_TEXT} characters)", 400
+    try:
+        m = master()
+        uid = uid_of(s["email"])
+    except Exception as e:
+        return fail(e)
+    with conn() as c:
+        row = c.execute(f"SELECT {COLS} FROM messages WHERE id=?", (mid,)).fetchone()
+        if not row:
+            return "Message not found", 404
+        if row[2] != uid:
+            return "You can only edit your own messages", 403
+        try:
+            mk = unseal(m, bytes(row[3]))
+            p = json.loads(unseal(mk, unseal(m, bytes(row[4]))))
+        except (InvalidTag, ValueError):
+            return "Message could not be read", 500
+        if not text and not p.get("a") and not p.get("g"):
+            return "Empty message", 400
+        if text == p.get("t", ""):
+            return jsonify({"id": mid, "x": text, "e": p.get("e")})
+        e = int(time.time() * 1000)
+        p["t"], p["e"] = text, e
+        c.execute("UPDATE messages SET body=? WHERE id=?", (seal(m, seal(mk, json.dumps(p).encode())), mid))
+    wipe_checkpoint()  # the old ciphertext is zeroed (secure_delete) and gone from the WAL
+    touch_activity()
+    publish({"t": "edit", "id": mid, "x": text, "e": e})
+    return jsonify({"id": mid, "x": text, "e": e})
+
+
+@app.route("/search")
+def search():  # substring search over message text and attachment names; the server can read the messages, so it does it
+    if not auth():
+        return "", 401
+    q = (request.args.get("q") or "").strip().casefold()
+    if len(q) < 2 or len(q) > 100:
+        return jsonify({"res": [], "more": False})
+    before = request.args.get("before", type=int)
+    try:
+        m = master()
+    except Exception as e:
+        return fail(e)
+    nk, out, more = nick_map(m), [], False
+    with conn() as c:
+        cur = (c.execute(f"SELECT {COLS} FROM messages WHERE id<? ORDER BY id DESC", (before,)) if before
+               else c.execute(f"SELECT {COLS} FROM messages ORDER BY id DESC"))
+        for row in cur:
+            x = open_row(m, row, nk)
+            if not x:
+                continue
+            names = [a.get("n", "") for a in x["a"]] + [(x.get("g") or {}).get("t", "")]
+            t = x["t"]
+            i = t.casefold().find(q)
+            if i < 0 and not any(q in n.casefold() for n in names):
+                continue
+            if len(out) == 30:
+                more = True
+                break
+            if i >= 0:
+                snip = ("…" if i > 40 else "") + t[max(0, i - 40):i + len(q) + 80].replace("\n", " ") + ("…" if len(t) > i + len(q) + 80 else "")
+            else:
+                snip = next((n for n in names if q in n.casefold()), "")
+            a0 = x["a"][0] if x["a"] else {}
+            out.append({"id": x["id"], "ts": x["ts"], "u": x["u"], "s": x["s"], "t": snip,
+                        "k": a0.get("k", "") or ("gif" if x.get("g") else "")})
+    return jsonify({"res": out, "more": more})
 
 
 @app.route("/heart", methods=["POST"])
@@ -2407,6 +2677,7 @@ def wipe():
             c.execute("DELETE FROM media")
             c.execute("DELETE FROM hearts")
             c.execute("DELETE FROM messages")  # every message key goes with its row
+        RECENT.clear()
         wipe_db()
         pv_clear()
     publish({"t": "wipe", "lock": WIPE_LOCK})

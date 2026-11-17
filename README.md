@@ -12,6 +12,9 @@ It is the sibling of *Bunny Interactive* (the file-manager web client) and share
 - Text with basic markdown (bold, italic, strike, inline/fenced code, quotes, lists, links)
 - Photos, videos, audio and files, voice messages (record, listen, send), share-to-app from the system share sheet
 - GIF picker with GIPHY and/or Klipy (optional, per-user choice)
+- Search over all messages, jump to any message (older ones are loaded on demand)
+- Edit your own messages (button, or long-press on mobile); edited messages are marked
+- Offline-tolerant sending: on a poor connection messages are queued, shown as pending, and sent when the connection returns
 - Replies (also by swiping), hearts, delete own messages, nicknames, link previews and tap-to-load embeds
 - Opt-in web push notifications (own VAPID / RFC 8291 implementation, no third-party SDK)
 - "Wipe chat" for any user, automatic wipe after inactivity
@@ -37,6 +40,12 @@ It is the sibling of *Bunny Interactive* (the file-manager web client) and share
 **Attachments.** Uploads are streamed straight through to the Bunny server under a random name with the prefix `.bunnyc.` (so file clients can hide them). Only the reference is stored in SQLite, and files are served only if they belong to a message.
 
 **GIFs.** Calls go from each user's browser directly to GIPHY or Klipy (as their terms require). Messages store only an id (GIPHY) or a slug plus two image URLs on `static.klipy.com` (Klipy), and every viewer's browser loads the picture itself. The server validates these references strictly.
+
+**Search and jump.** `GET /search` decrypts messages on the server and matches text and attachment names (case-insensitive, at least 2 characters, 30 results per page). `GET /messages?before=X&until=Y` returns everything from message Y up to X in one response, so jumping to an old message needs one request, not a page-by-page crawl.
+
+**Editing.** `POST /edit` (own messages only) re-encrypts the body under the message's existing key and stores an edit timestamp; the old ciphertext is zeroed (`secure_delete`, WAL checkpoint). Clients update live through an `edit` event.
+
+**Outbox.** Every message is queued in the browser (`localStorage`, survives reloads) and sent in order with a client-generated id. The server remembers the last 500 ids per sender (in memory), so a retry after a lost response returns the original message instead of posting a duplicate. Network errors, timeouts (20 s), 5xx and the post-wipe lock keep the message pending with backoff (3 s up to 30 s); definitive errors drop it with a notice. Edits and deletes need a connection and are not queued.
 
 **Wipe.** Deletes all rows and attachments, removes `.bunnyc`, runs `VACUUM` (SQLite runs with `secure_delete`), and locks writing for 5 seconds. A janitor thread does the same after `AUTOWIPE_HOURS` without activity.
 
@@ -102,6 +111,8 @@ Put it behind a reverse proxy with HTTPS: service worker, microphone access, pus
 
 ## Limitations
 
-- One room, no private chats, no message editing.
+- One room, no private chats.
+- Only the text of a message can be edited, not its attachments.
+- The retry protection is in memory: if the server restarts while a send is in doubt, an attachment message may be reported as failed although it arrived.
 - Settings (previews, GIF source, fake error screen) are per device.
 - iOS does not support share-to-app, and push requires the app to be added to the home screen.
