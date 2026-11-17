@@ -976,6 +976,7 @@ ICONS = {
     "download": '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5M12 15V3"/>',
     "heart": '<path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/>',
     "reply": '<path d="M9 14 4 9l5-5"/><path d="M20 20v-7a4 4 0 0 0-4-4H4"/>',
+    "logout": '<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="m16 17 5-5-5-5"/><path d="M21 12H9"/>',
     "sliders": '<path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3M1 14h6M9 8h6M17 16h6"/>',
     "chev": '<path d="m6 9 6 6 6-6"/>',
     "play": '<path d="M7 4.5v15l12-7.5z" fill="currentColor"/>',
@@ -1175,7 +1176,7 @@ CHAT = """<header class=bar>""" + BRAND + """<div class=rt><span id=st class=st 
 <button id=srb class="btn ghost sm" title="Search"><svg viewBox="0 0 24 24">{{I.search|safe}}</svg></button>
 <button id=setb class="btn ghost sm" title="Settings"><svg viewBox="0 0 24 24">{{I.sliders|safe}}</svg></button>
 <button id=wipeb class="btn ghost sm danger" title="Wipe chat"><svg viewBox="0 0 24 24">{{I.trash|safe}}</svg></button>
-<a class="btn ghost sm" href=/logout>Logout</a></div></header>
+<a class="btn ghost sm" href=/logout title="Logout"><svg viewBox="0 0 24 24">{{I.logout|safe}}</svg></a></div></header>
 <div class=wrap><div class=scroll id=scroll><div class=inner>
 <button id=older class="btn ghost sm" hidden>Load older</button><div id=msgs></div><div id=empty class=empty hidden>No messages yet. Say hi!</div></div></div>
 <button id=pill class=btn hidden><svg viewBox="0 0 24 24">{{I.down|safe}}</svg>New messages</button>
