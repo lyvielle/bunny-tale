@@ -723,6 +723,8 @@ def fcm_send(token, data):
                       headers={"Authorization": f"Bearer {fcm_token()}"},
                       json={"message": {"token": token, "data": {k: str(v) for k, v in data.items()},
                                         "android": {"priority": "HIGH", "ttl": "3600s"}}})
+    if r.status_code != 200:
+        print(f"[fcm] send failed {r.status_code}: {r.text[:300]}", flush=True)
     return r.status_code
 
 
@@ -747,14 +749,15 @@ def notify(sender_uid, name, atts, text, gif=False):
         try:
             sub = json.loads(unseal(m, bytes(blob)))
             if "fcm" in sub:
-                if FCM_SA and fcm_send(sub["fcm"], {"type": "message", "title": "Bunny Tale", "body": f"{name} {what}"}) in (400, 404):
+                if FCM_SA and fcm_send(sub["fcm"], {"type": "message", "title": "Bunny Tale", "body": f"{name} {what}"}) == 404:  # token no longer valid
                     with conn() as c:
                         c.execute("DELETE FROM push WHERE eid=?", (eid,))
                 continue
             if push_send(sub, payload) in (404, 410):  # subscription is gone
                 with conn() as c:
                     c.execute("DELETE FROM push WHERE eid=?", (eid,))
-        except Exception:
+        except Exception as e:
+            print(f"[push] failed: {type(e).__name__}: {e}", flush=True)
             continue
 
 
@@ -2879,6 +2882,7 @@ def push_fcm():  # Android app: register / remove an FCM token
             c.execute("DELETE FROM push WHERE eid=? AND uid=?", (eid, uid))
         else:
             c.execute("INSERT OR REPLACE INTO push VALUES(?,?,?)", (eid, uid, seal(m, json.dumps({"fcm": tok}).encode())))
+            print("[fcm] token registered", flush=True)
     return "", 204
 
 
