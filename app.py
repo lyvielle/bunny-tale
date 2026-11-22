@@ -47,6 +47,7 @@ app = Flask(__name__)
 app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
 app.config["SESSION_COOKIE_NAME"] = "bunnychat_session"  # cookies are shared across ports: don't clash with Interactive
 app.secret_key = os.environ.get("SECRET_KEY") or secrets.token_hex(32)
+app.permanent_session_lifetime = 90 * 24 * 3600
 
 
 class AuthError(Exception):  # not signed in / Bunny rejected the credentials
@@ -55,6 +56,22 @@ class AuthError(Exception):  # not signed in / Bunny rejected the credentials
 
 class BunnyError(Exception):  # Bunny unreachable or failing: the user stays signed in
     pass
+
+
+LOGIN_HINTS = {  # Bunny's login errors, in words a user can act on
+    "Mismatch between assigned user and requesting user": "This email does not belong to this license ID. Check both (your phone may have filled in another email).",
+    "Mismatch between hardware ID": "This email does not belong to this license ID. Check both (your phone may have filled in another email).",
+    "User not found": "No account with this email. Check its spelling, including upper and lower case.",
+}
+
+
+def login_reason(r):
+    t = reason(r)
+    return LOGIN_HINTS.get(t, t)
+
+
+def who(email):  # for logs: enough to tell accounts apart, not the full address
+    return email.split("@")[0][:3] + "…"
 
 
 def reason(r):
@@ -133,6 +150,7 @@ def pool_token(email, bad=None, verify=False):
             return p["token"]
         if r.status_code >= 500:
             raise BunnyError(reason(r))
+        print(f"[auth] automatic re-login for {who(key)} refused ({r.status_code}: {reason(r)}): signed out", flush=True)
         POOL.pop(key, None)
         raise AuthError
 
@@ -142,6 +160,7 @@ def new_session(email, stay=False):
     now = time.time()
     SESS[sid] = {"email": email.lower(), "name": email.split("@")[0][:32], "last": now, "chk": now, "stay": stay}
     session["sid"] = sid
+    session.permanent = True  # a phone that kills the browser/app must not lose the login with it
     return sid
 
 
@@ -251,6 +270,7 @@ def auto_login(bad_sid=None):
             except (AuthError, BunnyError):
                 r = bunny_login(creds)
                 if not r.ok:
+                    print(f"[auth] stay-signed-in login for {who(creds['email'])} refused ({r.status_code}: {reason(r)})", flush=True)
                     return None
                 pool_set(creds, token_of(r))
         except Exception:
@@ -266,6 +286,7 @@ def auth():
     s = SESS.get(sid)
     now = time.time()
     if s and not s["stay"] and now - s["last"] > IDLE:
+        print(f"[auth] {who(s['email'])} signed out after {IDLE // 3600} h unused (no stay signed in)", flush=True)
         release(sid)
         s = None
     if not s:
@@ -1423,10 +1444,10 @@ BRAND = '<div class=brand><span class=dot><svg viewBox="0 0 24 24">{{logo|safe}}
 LOGIN = """<div class=card>""" + BRAND + """
 <h1>Welcome back</h1><p class=sub>Sign in to join the chat</p><form method=post>
 <input type=hidden name=next value="{{nxt}}">
-<input name=license placeholder="License ID" value="{{lic}}" required>
-<input name=email type=email placeholder=Email value="{{em}}" autocomplete=username required>
+<input name=license placeholder="License ID" value="{{lic}}" autocomplete=off autocapitalize=off autocorrect=off spellcheck=false required>
+<input name=email type=email placeholder=Email value="{{em}}" autocomplete=username autocapitalize=off autocorrect=off spellcheck=false required>
 <input name=password type=password placeholder=Password autocomplete=current-password {% if em %}autofocus{% endif %} required>
-<label class=chk><input type=checkbox name=stay>Stay signed in</label>
+<label class=chk><input type=checkbox name=stay checked>Stay signed in</label>
 <button class=btn>Sign in</button></form></div>"""
 
 ERR = """<div class=card>""" + BRAND + """
@@ -2728,7 +2749,8 @@ def login():
                 else:
                     resp.delete_cookie("bc_rt")
                 return resp
-            flash(reason(r))
+            print(f"[auth] login for {who(creds['email'])} refused: {reason(r)}", flush=True)
+            flash(login_reason(r))
         except Exception as e:
             flash(str(e))
     return page(LOGIN, "auth", lic=request.form.get("license") or request.cookies.get("bc_lic", ""),

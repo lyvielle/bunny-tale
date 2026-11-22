@@ -12,6 +12,7 @@ import android.os.Build
 import android.os.Bundle
 import android.provider.MediaStore
 import android.provider.Settings
+import android.webkit.CookieManager
 import android.webkit.JavascriptInterface
 import android.webkit.PermissionRequest
 import android.webkit.ValueCallback
@@ -62,6 +63,8 @@ class MainActivity : AppCompatActivity() {
                 if (r.url.toString().startsWith(BuildConfig.SERVER_URL)) return false
                 startActivity(Intent(Intent.ACTION_VIEW, r.url)); return true  // external links open in the browser
             }
+            // WebView writes cookies to disk only every ~30 s: save the login right away, phones kill apps quickly
+            override fun onPageFinished(v: WebView, url: String) { CookieManager.getInstance().flush() }
         }
         web.webChromeClient = object : WebChromeClient() {
             override fun onShowFileChooser(v: WebView, cb: ValueCallback<Array<Uri>>, p: FileChooserParams): Boolean {
@@ -197,6 +200,7 @@ class MainActivity : AppCompatActivity() {
         AppState.foreground = false
         web.evaluateJavascript("window.__appVis&&window.__appVis(false)", null)  // the server stops treating the chat as open
         web.onPause()
+        CookieManager.getInstance().flush()
         super.onPause()
     }
 
