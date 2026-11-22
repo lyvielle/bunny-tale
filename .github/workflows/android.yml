@@ -1,0 +1,33 @@
+name: Android app (optional)
+on:
+  workflow_dispatch:
+
+# Repository secrets:   GOOGLE_SERVICES_JSON (contents of google-services.json), KEYSTORE_B64 (base64 of your .jks), KEYSTORE_PASSWORD
+# Repository variable:  BUNNY_TALE_URL (e.g. https://chat.example.com)
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: 17 }
+      - uses: gradle/actions/setup-gradle@v4
+        with: { gradle-version: "8.7" }
+      - name: Prepare secrets
+        working-directory: android
+        run: |
+          [ -n "${{ vars.BUNNY_TALE_URL }}" ] || { echo "Set the BUNNY_TALE_URL variable"; exit 1; }
+          echo '${{ secrets.GOOGLE_SERVICES_JSON }}' > app/google-services.json
+          echo '${{ secrets.KEYSTORE_B64 }}' | base64 -d > "$RUNNER_TEMP/release.jks"
+      - name: Build APK
+        working-directory: android
+        env:
+          BUNNY_TALE_URL: ${{ vars.BUNNY_TALE_URL }}
+          KEYSTORE_FILE: ${{ runner.temp }}/release.jks
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          VERSION_CODE: ${{ github.run_number }}
+        run: gradle --no-daemon assembleRelease
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bunny-tale-apk
+          path: android/app/build/outputs/apk/release/*.apk

@@ -87,6 +87,7 @@ Put it behind a reverse proxy with HTTPS: service worker, microphone access, pus
 | `KLIPY_API_KEY` | – | Enables Klipy; set either, both or none |
 | `GIPHY_RATING` | `pg-13` | `g`, `pg`, `pg-13` or `r` (both GIF sources) |
 | `VAPID_SUBJECT` | `BUNNY_API` | Contact shown to push services |
+| `FCM_SERVICE_ACCOUNT` | – | Firebase service-account JSON (or a path to it). Enables push to the optional Android app |
 | `REMEMBER_KEY` | generated | Fernet key for "stay signed in" |
 | `VERIFY_TLS` | `1` | `0` disables TLS verification towards the Bunny server |
 | `JANITOR_SECONDS` | `300` | Interval of the cleanup/auto-wipe check |
@@ -118,3 +119,15 @@ Put it behind a reverse proxy with HTTPS: service worker, microphone access, pus
 - The retry protection is in memory: if the server restarts while a send is in doubt, an attachment message may be reported as failed although it arrived.
 - Settings (previews, GIF source, fake error screen) are per device.
 - iOS does not support share-to-app, and push requires the app to be added to the home screen.
+
+## Optional Android app
+
+The PWA/browser version is unaffected. For more reliable notifications on Android there is a small native wrapper in `android/` (WebView + Firebase Cloud Messaging; it just loads your server).
+
+1. Create a free Firebase project, add an Android app with package `app.bunnytale`, download `google-services.json`.
+2. Project settings → Service accounts → generate a private key; set its JSON as `FCM_SERVICE_ACCOUNT` on the server.
+3. Create a signing key once: `keytool -genkeypair -keystore release.jks -alias bunnytale -keyalg RSA -keysize 2048 -validity 36500` and keep it (updates must use the same key).
+4. GitHub → Settings: secrets `GOOGLE_SERVICES_JSON`, `KEYSTORE_B64` (`base64 -w0 release.jks`), `KEYSTORE_PASSWORD`; variable `BUNNY_TALE_URL`.
+5. Run the *Android app (optional)* workflow and install the APK from its artifacts. Enable *Notifications* in the app's settings.
+
+The workflow is manual only. In the app, notifications go through FCM instead of Web Push.

@@ -8,7 +8,7 @@ import requests
 from cryptography.exceptions import InvalidTag
 from cryptography.fernet import Fernet, InvalidToken
 from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.primitives.asymmetric import ec, utils as asym_utils
+from cryptography.hazmat.primitives.asymmetric import ec, padding as asym_padding, utils as asym_utils
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from itsdangerous import URLSafeTimedSerializer
@@ -25,6 +25,7 @@ DATA_DIR = os.environ.get("DATA_DIR", "/data")
 AUTOWIPE_HOURS = float(os.environ.get("AUTOWIPE_HOURS", "48"))  # 0 disables the idle auto-wipe
 JANITOR_SECONDS = int(os.environ.get("JANITOR_SECONDS", "300"))
 VAPID_SUBJECT = os.environ.get("VAPID_SUBJECT", API)
+FCM_SA = os.environ.get("FCM_SERVICE_ACCOUNT", "").strip()  # Firebase service-account JSON (or path to it); enables push to the Android app
 KEYFILE = ".bunnyc"
 MAX_TEXT = 4000
 MAX_ATT = 10
@@ -683,6 +684,48 @@ def push_send(sub, payload):
     return r.status_code
 
 
+# ---- FCM (Android app only; HTTP v1 API, service-account JWT) ----
+_fcm = {"sa": None, "tok": None, "exp": 0}
+_fcm_lock = threading.Lock()
+
+
+def fcm_sa():
+    if _fcm["sa"] is None:
+        raw = FCM_SA
+        if raw and not raw.startswith("{") and os.path.exists(raw):
+            raw = open(raw).read()
+        try:
+            _fcm["sa"] = json.loads(raw) if raw else {}
+        except ValueError:
+            _fcm["sa"] = {}
+    return _fcm["sa"]
+
+
+def fcm_token():
+    with _fcm_lock:
+        if _fcm["tok"] and time.time() < _fcm["exp"] - 60:
+            return _fcm["tok"]
+        sa, now = fcm_sa(), int(time.time())
+        j = lambda d: b64u(json.dumps(d, separators=(",", ":")).encode())
+        msg = f'{j({"alg": "RS256", "typ": "JWT"})}.{j({"iss": sa["client_email"], "scope": "https://www.googleapis.com/auth/firebase.messaging", "aud": "https://oauth2.googleapis.com/token", "iat": now, "exp": now + 3600})}'
+        key = serialization.load_pem_private_key(sa["private_key"].encode(), None)
+        sig = key.sign(msg.encode(), asym_padding.PKCS1v15(), hashes.SHA256())
+        r = requests.post("https://oauth2.googleapis.com/token", timeout=15, data={
+            "grant_type": "urn:ietf:params:oauth:grant-type:jwt-bearer", "assertion": f"{msg}.{b64u(sig)}"})
+        r.raise_for_status()
+        _fcm["tok"], _fcm["exp"] = r.json()["access_token"], now + int(r.json().get("expires_in", 3600))
+        return _fcm["tok"]
+
+
+def fcm_send(token, data):
+    """Data-only, high-priority message: the app builds the notification itself, so it also works when the app is closed."""
+    r = requests.post(f"https://fcm.googleapis.com/v1/projects/{fcm_sa()['project_id']}/messages:send", timeout=15,
+                      headers={"Authorization": f"Bearer {fcm_token()}"},
+                      json={"message": {"token": token, "data": {k: str(v) for k, v in data.items()},
+                                        "android": {"priority": "HIGH", "ttl": "3600s"}}})
+    return r.status_code
+
+
 def notify(sender_uid, name, atts, text, gif=False):
     """Push to every subscribed device of users who are not looking at the chat right now. Runs in a worker thread."""
     m = _master
@@ -703,6 +746,11 @@ def notify(sender_uid, name, atts, text, gif=False):
             continue
         try:
             sub = json.loads(unseal(m, bytes(blob)))
+            if "fcm" in sub:
+                if FCM_SA and fcm_send(sub["fcm"], {"type": "message", "title": "Bunny Tale", "body": f"{name} {what}"}) in (400, 404):
+                    with conn() as c:
+                        c.execute("DELETE FROM push WHERE eid=?", (eid,))
+                continue
             if push_send(sub, payload) in (404, 410):  # subscription is gone
                 with conn() as c:
                     c.execute("DELETE FROM push WHERE eid=?", (eid,))
@@ -1781,17 +1829,26 @@ async function wipe(){
 $('#wipeb').onclick=wipe;
 
 /* ---- push notifications (opt-in) ---- */
-const canPush='serviceWorker' in navigator&&'PushManager' in window&&'Notification' in window&&!!ME.vapid;
+const APP=window.BunnyApp||null; // set by the Android app
+const canPush=APP?!!ME.fcm:('serviceWorker' in navigator&&'PushManager' in window&&'Notification' in window&&!!ME.vapid);
 const u8=s=>Uint8Array.from(atob(s.replace(/-/g,'+').replace(/_/g,'/')+'='.repeat((4-s.length%4)%4)),c=>c.charCodeAt(0));
 let pushOn=false;
+let fcmTok=null;
+window.__fcm=t=>{fcmTok=t;try{localStorage.setItem('fcmTok',t)}catch(_){}if(localStorage.getItem('fcmOn')==='1')fetch('/push/fcm',{method:'POST',headers:JH,body:JSON.stringify({token:t})}).catch(()=>{})};
 async function pushRefresh(){
  if(!canPush)return false;
+ if(APP){pushOn=localStorage.getItem('fcmOn')==='1';if(pushOn)APP.requestToken();return pushOn}
  const reg=await navigator.serviceWorker.ready,sub=await reg.pushManager.getSubscription();
  pushOn=!!sub&&Notification.permission==='granted';
  if(pushOn)fetch('/push/subscribe',{method:'POST',headers:JH,body:JSON.stringify(sub.toJSON())}).catch(()=>{}); // keeps the server in sync
  return pushOn;
 }
 async function pushSet(want){ // returns the state that is really active afterwards
+ if(APP){
+  if(want){localStorage.setItem('fcmOn','1');APP.requestToken()}
+  else{localStorage.setItem('fcmOn','0');const t=fcmTok||localStorage.getItem('fcmTok');if(t)fetch('/push/fcm',{method:'POST',headers:JH,body:JSON.stringify({token:t,off:true})}).catch(()=>{})}
+  return pushOn=want;
+ }
  const reg=await navigator.serviceWorker.ready;let sub=await reg.pushManager.getSubscription();
  if(!want){
   if(sub){
@@ -2397,7 +2454,7 @@ def index():
     try:
         m = master()
         uid = uid_of(s["email"])
-        me = {"uid": uid, "name": nick_map(m).get(uid) or s["name"], "vapid": vapid()[1], "gate": gate_on(), "sound": SOUND_URL,
+        me = {"uid": uid, "name": nick_map(m).get(uid) or s["name"], "vapid": vapid()[1], "fcm": bool(FCM_SA), "gate": gate_on(), "sound": SOUND_URL,
               "gif": {"giphy": {"key": GIPHY_KEY, "rating": GIPHY_RATING} if GIPHY_KEY else None,
                       "klipy": {"key": KLIPY_KEY, "rating": GIPHY_RATING} if KLIPY_KEY else None}}
     except AuthError:
@@ -2799,6 +2856,29 @@ def push_subscribe():
     with conn() as c:
         c.execute("INSERT OR REPLACE INTO push VALUES(?,?,?)",
                   (hashlib.sha256(ep.encode()).hexdigest(), uid, seal(m, json.dumps(sub).encode())))
+    return "", 204
+
+
+@app.route("/push/fcm", methods=["POST"])
+def push_fcm():  # Android app: register / remove an FCM token
+    s = auth()
+    if not s:
+        return "", 401
+    j = request.get_json(silent=True) or {}
+    tok = str(j.get("token", ""))
+    if not FCM_SA or not 20 < len(tok) < 400:
+        return "FCM is not configured", 400
+    try:
+        m = master()
+        uid = uid_of(s["email"])
+    except Exception as e:
+        return fail(e)
+    eid = hashlib.sha256(("fcm:" + tok).encode()).hexdigest()
+    with conn() as c:
+        if j.get("off"):
+            c.execute("DELETE FROM push WHERE eid=? AND uid=?", (eid, uid))
+        else:
+            c.execute("INSERT OR REPLACE INTO push VALUES(?,?,?)", (eid, uid, seal(m, json.dumps({"fcm": tok}).encode())))
     return "", 204
 
 

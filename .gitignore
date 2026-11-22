@@ -4,3 +4,8 @@ __pycache__/
 *.db
 *.sqlite*
 data/
+android/app/google-services.json
+android/.gradle/
+android/build/
+android/app/build/
+*.jks
