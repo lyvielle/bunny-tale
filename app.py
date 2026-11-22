@@ -391,7 +391,8 @@ def init_db():
         CREATE TABLE IF NOT EXISTS meta(k TEXT PRIMARY KEY, v BLOB NOT NULL);
         CREATE TABLE IF NOT EXISTS nicks(uid TEXT PRIMARY KEY, nick BLOB NOT NULL);
         CREATE TABLE IF NOT EXISTS hearts(msg_id INTEGER NOT NULL, uid TEXT NOT NULL, PRIMARY KEY(msg_id, uid));
-        CREATE TABLE IF NOT EXISTS push(eid TEXT PRIMARY KEY, uid TEXT NOT NULL, sub BLOB NOT NULL);""")
+        CREATE TABLE IF NOT EXISTS push(eid TEXT PRIMARY KEY, uid TEXT NOT NULL, sub BLOB NOT NULL);
+        CREATE TABLE IF NOT EXISTS members(uid TEXT PRIMARY KEY, name BLOB NOT NULL);""")
     c.execute("INSERT OR IGNORE INTO meta VALUES('activity', ?)", (str(int(time.time())).encode(),))
     c.commit()
     c.close()
@@ -466,7 +467,7 @@ def open_row(m, row, nk):
     except (InvalidTag, ValueError):
         return None
     return {"id": id_, "ts": ts, "u": uid, "s": nk.get(uid) or p.get("s", ""), "t": p.get("t", ""),
-            "a": p.get("a", []), "r": p.get("r"), "g": p.get("g"), "e": p.get("e")}
+            "a": p.get("a", []), "r": p.get("r"), "g": p.get("g"), "e": p.get("e"), "x": p.get("x")}
 
 
 def quote_of(m, rid, nk):
@@ -504,7 +505,9 @@ def decode_rows(m, rows, nk):
 init_db()
 
 # ---- live updates (server-sent events) ----
-SUBS = {}  # queue -> {uid, cid, visible}
+SUBS = {}  # queue -> {uid, cid}
+PRES = {}  # page id (cid) -> {uid, vis, seen, app}: is that page in front of its user? Kept alive by heartbeats
+PRES_TTL = 50  # a visible page sends a heartbeat every 20 s; without one for this long it counts as gone
 _slock = threading.Lock()
 WIPE_UNTIL = 0.0
 RECENT = OrderedDict()  # (uid, client id) -> the message created for it, so a retried send is answered, not repeated
@@ -520,6 +523,28 @@ def publish(ev):
         except queue.Full:  # slow client: dropped, it re-syncs when it reconnects
             with _slock:
                 SUBS.pop(q, None)
+
+
+def pres_set(cid, uid, vis, app=None):
+    if not cid:
+        return
+    with _slock:
+        p = PRES.setdefault(cid, {"uid": uid, "vis": False, "seen": 0, "app": False})
+        p.update(uid=uid, vis=bool(vis), seen=time.time())
+        if app is not None:
+            p["app"] = bool(app)
+
+
+def watching():
+    """uid -> what kind of page ("app"/"web") has the chat in front of that user right now."""
+    now, out = time.time(), {}
+    with _slock:
+        for cid, p in list(PRES.items()):
+            if now - p["seen"] > 3600:
+                PRES.pop(cid, None)
+            elif p["vis"] and now - p["seen"] < PRES_TTL:
+                out[p["uid"]] = "app" if p["app"] else "web"
+    return out
 
 
 def alive(sid):
@@ -580,7 +605,7 @@ def autowipe_check():
         with conn() as c:
             refs = [r for (r,) in c.execute("SELECT ref FROM media")]
             old = json.loads(meta_get("orphans") or "[]")
-            for t in ("media", "hearts", "messages", "nicks", "push"):
+            for t in ("media", "hearts", "messages", "nicks", "push", "members"):
                 c.execute(f"DELETE FROM {t}")
             c.execute("DELETE FROM meta WHERE k='check'")
             for k, v in (("orphans", json.dumps(old + refs)), ("pending", "1"), ("idle_done", last)):
@@ -691,14 +716,22 @@ _fcm_lock = threading.Lock()
 
 def fcm_sa():
     if _fcm["sa"] is None:
-        raw = FCM_SA
-        if raw and not raw.startswith("{"):
-            raw = open(raw).read() if os.path.exists(raw) else base64.b64decode(raw + "=" * (-len(raw) % 4)).decode("utf-8", "replace")
+        raw, sa = FCM_SA, {}
         try:
-            _fcm["sa"] = json.loads(raw) if raw else {}
-        except ValueError:
-            _fcm["sa"] = {}
+            if raw and not raw.startswith("{"):
+                raw = open(raw).read() if os.path.exists(raw) else base64.b64decode(raw + "=" * (-len(raw) % 4)).decode("utf-8", "replace")
+            sa = json.loads(raw) if raw else {}
+            if raw and not all(sa.get(k) for k in ("client_email", "private_key", "project_id")):
+                raise ValueError("client_email, private_key or project_id missing")
+        except Exception as e:
+            print(f"[fcm] FCM_SERVICE_ACCOUNT is set but unusable ({type(e).__name__}: {e}); Android push is off", flush=True)
+            sa = {}
+        _fcm["sa"] = sa
     return _fcm["sa"]
+
+
+def fcm_on():
+    return bool(fcm_sa())
 
 
 def fcm_token():
@@ -712,56 +745,215 @@ def fcm_token():
         sig = key.sign(msg.encode(), asym_padding.PKCS1v15(), hashes.SHA256())
         r = requests.post("https://oauth2.googleapis.com/token", timeout=15, data={
             "grant_type": "urn:ietf:params:oauth:grant-type:jwt-bearer", "assertion": f"{msg}.{b64u(sig)}"})
+        if not r.ok:
+            print(f"[fcm] OAuth token request failed {r.status_code}: {r.text[:300]}", flush=True)
         r.raise_for_status()
         _fcm["tok"], _fcm["exp"] = r.json()["access_token"], now + int(r.json().get("expires_in", 3600))
         return _fcm["tok"]
 
 
-def fcm_send(token, data):
-    """Data-only, high-priority message: the app builds the notification itself, so it also works when the app is closed."""
-    r = requests.post(f"https://fcm.googleapis.com/v1/projects/{fcm_sa()['project_id']}/messages:send", timeout=15,
-                      headers={"Authorization": f"Bearer {fcm_token()}"},
-                      json={"message": {"token": token, "data": {k: str(v) for k, v in data.items()},
-                                        "android": {"priority": "HIGH", "ttl": "3600s"}}})
+def fcm_send(token, data, ttl=3600):
+    """Data-only, high-priority message: the app builds the notification itself, so it also works when the app is closed.
+    Returns the HTTP status, or 0 when the request could not be made at all."""
+    try:
+        r = requests.post(f"https://fcm.googleapis.com/v1/projects/{fcm_sa()['project_id']}/messages:send", timeout=15,
+                          headers={"Authorization": f"Bearer {fcm_token()}"},
+                          json={"message": {"token": token, "data": {k: str(v) for k, v in data.items()},
+                                            "android": {"priority": "HIGH", "ttl": f"{ttl}s"}}})
+    except Exception as e:
+        print(f"[fcm] send error: {type(e).__name__}: {e}", flush=True)
+        return 0
+    if r.status_code == 401:  # cached OAuth token was rejected: fetch a new one next time
+        _fcm["tok"] = None
     if r.status_code != 200:
         print(f"[fcm] send failed {r.status_code}: {r.text[:300]}", flush=True)
     return r.status_code
 
 
-def notify(sender_uid, name, atts, text, gif=False):
-    """Push to every subscribed device of users who are not looking at the chat right now. Runs in a worker thread."""
+def push_devices(uid=None):
+    """Registered devices as (eid, uid, sub); sub is {"fcm": token, "msgs": bool} or a Web Push subscription."""
     m = _master
     if not m:
-        return
-    with _slock:
-        here = {i["uid"] for i in SUBS.values() if i["visible"]}
+        return []
     with conn() as c:
-        rows = c.execute("SELECT eid, uid, sub FROM push").fetchall()
-    what = "sent a message"
-    if gif and not text and not atts:
-        what = "sent a GIF"
-    elif atts and not text:
-        what = {"image": "sent a photo", "video": "sent a video", "audio": "sent an audio file"}.get(atts[0]["k"], "sent a file")
-    payload = json.dumps({"title": "Bunny Tale", "body": f"{name} {what}"}).encode()
-    for eid, uid, blob in rows:
-        if uid == sender_uid or uid in here:
-            print(f"[push] skipped a device ({'sender' if uid == sender_uid else 'chat is open'})", flush=True)
-            continue
+        rows = c.execute("SELECT eid, uid, sub FROM push" + (" WHERE uid=?" if uid else ""), (uid,) if uid else ()).fetchall()
+    out = []
+    for eid, u, blob in rows:
         try:
-            sub = json.loads(unseal(m, bytes(blob)))
-            if "fcm" in sub:
-                st = fcm_send(sub["fcm"], {"type": "message", "title": "Bunny Tale", "body": f"{name} {what}"}) if FCM_SA else None
-                print(f"[fcm] sent to a device, status {st}", flush=True)
-                if st == 404:  # token no longer valid
-                    with conn() as c:
-                        c.execute("DELETE FROM push WHERE eid=?", (eid,))
-                continue
-            if push_send(sub, payload) in (404, 410):  # subscription is gone
-                with conn() as c:
-                    c.execute("DELETE FROM push WHERE eid=?", (eid,))
-        except Exception as e:
-            print(f"[push] failed: {type(e).__name__}: {e}", flush=True)
+            out.append((eid, u, json.loads(unseal(m, bytes(blob)))))
+        except (InvalidTag, ValueError):
+            print(f"[push] device {eid[:8]} cannot be read (key changed?), removed", flush=True)
+            with conn() as c:
+                c.execute("DELETE FROM push WHERE eid=?", (eid,))
+    return out
+
+
+def push_drop(eid):
+    with conn() as c:
+        c.execute("DELETE FROM push WHERE eid=?", (eid,))
+
+
+def push_one(eid, sub, title, body, extra=None):
+    """Deliver one notification to one device and clean up devices that are gone. Runs in a pool thread."""
+    try:
+        if "fcm" in sub:
+            if not fcm_on():
+                print(f"[push] app {eid[:8]}: skipped, FCM is not configured", flush=True)
+                return 0
+            st = fcm_send(sub["fcm"], {"type": "message", "title": title, "body": body, **(extra or {})})
+            print(f"[push] app {eid[:8]}: FCM status {st}", flush=True)
+            if st == 404:  # token no longer valid
+                push_drop(eid)
+            return st
+        st = push_send(sub, json.dumps({"title": title, "body": body, **(extra or {})}).encode())
+        print(f"[push] web {eid[:8]}: status {st}", flush=True)
+        if st in (404, 410):  # subscription is gone
+            push_drop(eid)
+        return st
+    except Exception as e:
+        print(f"[push] {eid[:8]} failed: {type(e).__name__}: {e}", flush=True)
+        return 0
+
+
+def notify(sender_uid, name, atts, text, gif=False, what=None):
+    """Push to every subscribed device of users who are not looking at the chat right now. Runs in a worker thread."""
+    if not what:
+        what = "sent a message"
+        if gif and not text and not atts:
+            what = "sent a GIF"
+        elif atts and not text:
+            what = {"image": "sent a photo", "video": "sent a video", "audio": "sent an audio file"}.get(atts[0]["k"], "sent a file")
+    here = watching()
+    devs = push_devices()
+    print(f"[push] {name} {what}: {len(devs)} device(s), chat open for {len(here)} user(s)", flush=True)
+    for eid, uid, sub in devs:
+        kind = "app" if "fcm" in sub else "web"
+        if uid == sender_uid:
             continue
+        if uid in here:
+            print(f"[push] {kind} {eid[:8]}: skipped, its user has the chat open ({here[uid]})", flush=True)
+            continue
+        if kind == "app" and sub.get("msgs") is False:
+            continue  # app registered for alarms only (notifications switched off)
+        PUSHPOOL.submit(push_one, eid, sub, "Bunny Tale", f"{name} {what}")
+
+
+# ---- alarms: wake another member. The Android app gets it via FCM (full screen); browsers only when no app is registered ----
+ALARM_RING = 90  # seconds a device rings before it gives up and reports "timeout"
+ALARM_SNOOZE = 5 * 60
+ALARM_COOLDOWN = 30  # per sender
+ALARMS = {}  # alarm id -> {id, tok, frm, frm_name, to, to_name, state, ring, via, rang_at, acked}
+LAST_ALARM = {}  # sender uid -> time of the last alarm
+_alock = threading.Lock()
+
+
+def member_names(m):
+    """uid -> display name of everybody who opened the chat since the last auto-wipe (nickname first)."""
+    out = {}
+    with conn() as c:
+        for uid, blob in c.execute("SELECT uid, name FROM members"):
+            try:
+                out[uid] = unseal(m, bytes(blob)).decode()
+            except (InvalidTag, UnicodeDecodeError):
+                pass
+    out.update(nick_map(m))
+    return out
+
+
+def post_system(uid, name, x, what=None):
+    """A system line in the chat (alarm sent / snoozed / dismissed / timed out), stored like any message."""
+    try:
+        m = master()
+        mk, ts = os.urandom(32), int(time.time() * 1000)
+        payload = {"s": name, "t": "", "a": [], "x": x}
+        with conn() as c:
+            mid = c.execute("INSERT INTO messages(ts,uid,mkey,body) VALUES(?,?,?,?)",
+                            (ts, uid, seal(m, mk), seal(m, seal(mk, json.dumps(payload).encode())))).lastrowid
+    except Exception as e:
+        print(f"[alarm] could not post to the chat: {type(e).__name__}: {e}", flush=True)
+        return
+    touch_activity()
+    publish({"t": "msg", "m": {"id": mid, "ts": ts, "u": uid, "s": name, "t": "", "a": [], "h": [], "x": x}})
+    if what:
+        PUSHPOOL.submit(notify, uid, name, [], "", what=what)
+
+
+def alarm_pub(a):  # what a browser of the woken user gets
+    return {"id": a["id"], "to": a["to"], "from": a["frm_name"], "ring": a["ring"],
+            "left": max(5, int(ALARM_RING - (time.time() - (a["acked"] or a["rang_at"]))))}
+
+
+def alarm_ring(a):
+    """(Re)start ringing: first send, and again after a snooze."""
+    with _alock:
+        if a["state"] not in ("new", "snoozed"):
+            return
+        a.update(state="ringing", ring=a["ring"] + 1, via=None, rang_at=time.time(), acked=0)
+        ring = a["ring"]
+    PUSHPOOL.submit(alarm_deliver, a, ring)
+    threading.Timer(15, alarm_watch, (a, ring)).start()
+
+
+def alarm_deliver(a, ring):
+    data = {"type": "alarm", "id": a["id"], "tok": a["tok"], "from": a["frm_name"], "ring": ring, "secs": ALARM_RING}
+    sent = 0
+    devs = push_devices(a["to"])
+    if fcm_on():
+        for eid, _, sub in devs:
+            if "fcm" in sub:
+                st = fcm_send(sub["fcm"], data, ttl=ALARM_RING)
+                print(f"[alarm] {a['id'][:6]} ring {ring} → app {eid[:8]}: FCM status {st}", flush=True)
+                if st == 200:
+                    sent += 1
+                elif st == 404:
+                    push_drop(eid)
+    with _alock:
+        if a["ring"] != ring or a["state"] != "ringing":
+            return
+        a["via"] = "app" if sent else "web"  # the app has priority: browsers stay quiet while an app rings
+    if sent:
+        return
+    print(f"[alarm] {a['id'][:6]} ring {ring} → browsers (no app reachable)", flush=True)
+    publish({"t": "alarm", "a": alarm_pub(a)})
+    for eid, _, sub in devs:
+        if "fcm" not in sub:
+            PUSHPOOL.submit(push_one, eid, sub, "⏰ Alarm", f"{a['frm_name']} is trying to wake you", {"alarm": a["id"]})
+
+
+def alarm_watch(a, ring):
+    """Server-side safety net: a device that never answers (offline, killed) still ends the alarm."""
+    with _alock:
+        if a["state"] != "ringing" or a["ring"] != ring:
+            return
+        deadline = a["acked"] + ALARM_RING + 30 if a["acked"] else a["rang_at"] + 5 * 60
+    if time.time() < deadline:
+        threading.Timer(min(15, max(1, deadline - time.time())), alarm_watch, (a, ring)).start()
+        return
+    alarm_end(a, "timeout" if a["acked"] else "missed")
+
+
+def alarm_end(a, action):
+    with _alock:
+        if a["state"] != "ringing":
+            return False
+        a["state"] = "snoozed" if action == "snooze" else "done"
+        via = a["via"]
+        if a["state"] == "done":
+            ALARMS.pop(a["id"], None)
+    print(f"[alarm] {a['id'][:6]} ring {a['ring']}: {action}", flush=True)
+    publish({"t": "alarm_end", "id": a["id"]})
+    if via == "app":  # stop it on the woken user's other phones too
+        for eid, _, sub in push_devices(a["to"]):
+            if "fcm" in sub:
+                PUSHPOOL.submit(fcm_send, sub["fcm"], {"type": "alarm_stop", "id": a["id"]}, 600)
+    x = {"k": action, "by": a["frm_name"]}
+    what = {"snooze": f"snoozed the alarm for {ALARM_SNOOZE // 60} minutes", "dismiss": "dismissed the alarm",
+            "timeout": "did not react to the alarm", "missed": "could not be reached by the alarm"}[action]
+    if action == "snooze":
+        x["m"] = ALARM_SNOOZE // 60
+        threading.Timer(ALARM_SNOOZE, alarm_ring, (a,)).start()
+    post_system(a["to"], a["to_name"], x, what)
+    return True
 
 
 # ---- link previews: fetched by the server, thumbnails proxied, kept in memory only (never on disk) ----
@@ -1034,6 +1226,8 @@ ICONS = {
     "sliders": '<path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3M1 14h6M9 8h6M17 16h6"/>',
     "chev": '<path d="m6 9 6 6 6-6"/>',
     "play": '<path d="M7 4.5v15l12-7.5z" fill="currentColor"/>',
+    "alarm": '<circle cx="12" cy="13" r="8"/><path d="M12 9v4l2 2M5 3 2 6M22 6l-3-3"/>',
+    "camera": '<path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/>',
     "bell": '<path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/>',
 }
 app.jinja_env.globals["logo"] = ICONS["bunny"]
@@ -1184,6 +1378,14 @@ body.drag #drop{display:grid}
 .lb{position:fixed;inset:0;background:#000e;z-index:70;overflow:hidden;touch-action:none;user-select:none;-webkit-user-select:none}
 .lb img{position:absolute;left:0;top:0;transform-origin:0 0;max-width:none;max-height:none;cursor:grab;will-change:transform}.lb img:active{cursor:grabbing}
 .lbx{position:absolute;top:calc(12px + env(safe-area-inset-top));right:12px;z-index:2;background:#000a}
+.sysrow{display:flex;justify-content:center;align-items:center;gap:6px;margin:12px 0;color:var(--mute);font-size:13px;text-align:center}
+.sysrow svg{width:15px;height:15px;color:#f59e0b}.sysrow .tm{opacity:.65;font-size:12px}
+.mlist{display:grid;gap:6px;margin:0 0 18px}.mlist button{justify-content:flex-start;width:100%}
+.modal.alarm{background:#000e;z-index:95}.acard{text-align:center;max-width:380px}
+.acard .aico{display:grid;place-items:center;margin:4px auto 14px;width:84px;height:84px;border-radius:50%;background:#f59e0b22;color:#f59e0b;animation:aring 1s ease-in-out infinite}
+.acard .aico svg{width:46px;height:46px}.acard h3{font-size:22px}.acard .macts{justify-content:center}.acard .btn{min-width:120px;padding:12px 18px}
+@keyframes aring{0%,100%{transform:rotate(0)}20%{transform:rotate(-14deg)}40%{transform:rotate(14deg)}60%{transform:rotate(-8deg)}80%{transform:rotate(8deg)}}
+@media (prefers-reduced-motion:reduce){.acard .aico{animation:none}}
 .modal{position:fixed;inset:0;background:#000b;display:grid;place-items:center;z-index:80;padding:16px}
 .mcard{width:100%;max-width:360px;background:var(--card);border:1px solid var(--line);border-radius:16px;padding:24px}
 .mcard.set{max-width:420px;max-height:calc(100vh - 32px);max-height:calc(100dvh - 32px);overflow-y:auto;overscroll-behavior:contain}.mcard.set h3{margin-bottom:8px}
@@ -1230,7 +1432,7 @@ CHAT = """<header class=bar>""" + BRAND + """<div class=rt><span id=st class=st 
 <button id=srb class="btn ghost sm" title="Search"><svg viewBox="0 0 24 24">{{I.search|safe}}</svg></button>
 <button id=setb class="btn ghost sm" title="Settings"><svg viewBox="0 0 24 24">{{I.sliders|safe}}</svg></button>
 <button id=wipeb class="btn ghost sm danger" title="Wipe chat"><svg viewBox="0 0 24 24">{{I.trash|safe}}</svg></button>
-<a class="btn ghost sm" href=/logout title="Logout"><svg viewBox="0 0 24 24">{{I.logout|safe}}</svg></a></div></header>
+<a id=logoutb class="btn ghost sm" href=/logout title="Logout"><svg viewBox="0 0 24 24">{{I.logout|safe}}</svg></a></div></header>
 <div class=wrap><div class=scroll id=scroll><div class=inner>
 <button id=older class="btn ghost sm" hidden>Load older</button><div id=msgs></div><div id=empty class=empty hidden>No messages yet. Say hi!</div></div></div>
 <button id=pill class=btn hidden><svg viewBox="0 0 24 24">{{I.down|safe}}</svg>New messages</button>
@@ -1246,7 +1448,8 @@ CHAT = """<header class=bar>""" + BRAND + """<div class=rt><span id=st class=st 
 <div id=amenu class=amenu hidden><button type=button id=mmedia><svg viewBox="0 0 24 24">{{I.image|safe}}</svg>Attach media</button>
 <button type=button id=mfile><svg viewBox="0 0 24 24">{{I.clip|safe}}</svg>Attach file</button>
 <button type=button id=mgif><span class=gb>GIF</span>Send a GIF</button>
-<button type=button id=mrec><svg viewBox="0 0 24 24">{{I.mic|safe}}</svg>Record voice</button></div>
+<button type=button id=mrec><svg viewBox="0 0 24 24">{{I.mic|safe}}</svg>Record voice</button>
+<button type=button id=malarm><svg viewBox="0 0 24 24">{{I.alarm|safe}}</svg>Send alarm</button></div>
 <textarea id=ta rows=1 maxlength=4000 placeholder="Message" autocomplete=off></textarea>
 <button type=button id=sendb class=btn title=Send disabled><svg viewBox="0 0 24 24">{{I.send|safe}}</svg></button></form></div></div>
 <div id=drop>Drop files to attach</div><div id=toasts class=tst></div>
@@ -1373,6 +1576,7 @@ function quoteEl(q){
  return d;
 }
 function paintHearts(row){
+ if(!row._hp)return; // system lines have no hearts
  const h=row._h||[],mine=h.includes(ME.uid);
  row._hp.hidden=!h.length;row._hp.classList.toggle('mine',mine);
  row._hp.replaceChildren(svg('heart'),...(h.length>1?[el('span','',String(h.length))]:[]));
@@ -1586,7 +1790,10 @@ function addPreview(host,u){
  box._go=async()=>{const j=await pvFetch(u);if(!j||!j.ok)return;box.appendChild(card(j,u,pvCol()));if(stick)toBottom()};
  pvIO.observe(box);
 }
+const sysText=m=>{const x=m.x||{};return x.k==='sent'?m.s+' sent an alarm to '+(x.n||'someone'):x.k==='snooze'?m.s+' snoozed the alarm ('+(x.m||5)+' min)':
+ x.k==='dismiss'?m.s+' dismissed the alarm':x.k==='timeout'?m.s+' did not react to the alarm (timed out)':x.k==='missed'?m.s+' could not be reached by the alarm':''};
 function build(m){
+ if(m.x){const row=el('div','sysrow');row.dataset.id=m.id;row._m=m;row.appendChild(svg('alarm'));row.appendChild(el('span','',sysText(m)));row.appendChild(el('span','tm',fmt(m.ts)));return row}
  const own=m.u===ME.uid,row=el('div','mrow'+(own?' own':'')),b=el('div','bub');
  row.dataset.id=m.id;row._h=m.h||[];row._m=m;
  if(!own){const w=el('div','who',m.s);w.dataset.u=m.u;b.appendChild(w)}
@@ -1840,10 +2047,24 @@ const canPush=APP?!!ME.fcm:('serviceWorker' in navigator&&'PushManager' in windo
 const u8=s=>Uint8Array.from(atob(s.replace(/-/g,'+').replace(/_/g,'/')+'='.repeat((4-s.length%4)%4)),c=>c.charCodeAt(0));
 let pushOn=false;
 let fcmTok=null;
-window.__fcm=t=>{fcmTok=t;try{localStorage.setItem('fcmTok',t)}catch(_){}if(localStorage.getItem('fcmOn')==='1')fetch('/push/fcm',{method:'POST',headers:JH,body:JSON.stringify({token:t})}).catch(()=>{})};
+const fcmMsgs=()=>{try{return localStorage.getItem('fcmOn')==='1'}catch(_){return false}};
+/* the app always registers its FCM token: alarms reach it even with notifications off (msgs:false) */
+window.__fcm=t=>{fcmTok=t;try{localStorage.setItem('fcmTok',t)}catch(_){}
+ fetch('/push/fcm',{method:'POST',headers:JH,body:JSON.stringify({token:t,msgs:fcmMsgs()})}).then(async r=>{if(!r.ok)console.warn('FCM registration failed',r.status,await r.text())}).catch(()=>{})};
+if(APP){$('#logoutb').addEventListener('click',e=>{ // a signed-out phone must not ring or get notifications for this account
+ const t=fcmTok||localStorage.getItem('fcmTok');if(!t)return;e.preventDefault();
+ fetch('/push/fcm',{method:'POST',headers:JH,keepalive:true,body:JSON.stringify({token:t,off:true})}).catch(()=>{}).finally(()=>{location.href='/logout'})})}
+/* presence: a visible page sends a heartbeat; the server only treats the chat as open while heartbeats arrive.
+   In the app, the activity tells the page when it goes to the background (WebViews don't always report that). */
+let appBg=false;
+const away=()=>document.hidden||appBg;
+const presence=()=>fetch('/presence',{method:'POST',headers:JH,keepalive:true,body:JSON.stringify({cid,visible:!away(),app:!!APP})}).catch(()=>{});
+setInterval(()=>{if(!away())presence()},20000);
+addEventListener('pagehide',()=>{appBg=true;presence()});
+window.__appVis=v=>{appBg=!v;presence();if(v)wake()};
 async function pushRefresh(){
  if(!canPush)return false;
- if(APP){pushOn=localStorage.getItem('fcmOn')==='1';if(pushOn)APP.requestToken();return pushOn}
+ if(APP){pushOn=fcmMsgs();if(APP.setMessages)APP.setMessages(pushOn);APP.requestToken();return pushOn}
  const reg=await navigator.serviceWorker.ready,sub=await reg.pushManager.getSubscription();
  pushOn=!!sub&&Notification.permission==='granted';
  if(pushOn)fetch('/push/subscribe',{method:'POST',headers:JH,body:JSON.stringify(sub.toJSON())}).catch(()=>{}); // keeps the server in sync
@@ -1851,8 +2072,8 @@ async function pushRefresh(){
 }
 async function pushSet(want){ // returns the state that is really active afterwards
  if(APP){
-  if(want){localStorage.setItem('fcmOn','1');APP.requestToken()}
-  else{localStorage.setItem('fcmOn','0');const t=fcmTok||localStorage.getItem('fcmTok');if(t)fetch('/push/fcm',{method:'POST',headers:JH,body:JSON.stringify({token:t,off:true})}).catch(()=>{})}
+  try{localStorage.setItem('fcmOn',want?'1':'0')}catch(_){}
+  if(APP.setMessages)APP.setMessages(want);APP.requestToken(); // re-registers with the new setting
   return pushOn=want;
  }
  const reg=await navigator.serviceWorker.ready;let sub=await reg.pushManager.getSubscription();
@@ -1872,6 +2093,61 @@ async function pushSet(want){ // returns the state that is really active afterwa
  }catch(e){toast('Could not turn on notifications')}
  return pushRefresh();
 }
+
+/* ---- alarms: wake someone up; ringing here only when they have no Android app (the app rings full screen) ---- */
+let alarmCool=0,alarmUi=null,actx=null;
+const unlockAudio=()=>{try{if(!actx)actx=new (window.AudioContext||window.webkitAudioContext)();if(actx.state==='suspended')actx.resume()}catch(_){}};
+addEventListener('pointerdown',unlockAudio,true);addEventListener('keydown',unlockAudio,true);
+function alarmBeep(){
+ if(!actx)unlockAudio();if(!actx)return;
+ try{if(actx.state==='suspended')actx.resume();const t=actx.currentTime;
+  [0,.22,.44].forEach(d=>{const o=actx.createOscillator(),g=actx.createGain();o.type='square';o.frequency.value=880;
+   g.gain.setValueAtTime(.0001,t+d);g.gain.exponentialRampToValueAtTime(.2,t+d+.01);g.gain.exponentialRampToValueAtTime(.0001,t+d+.16);
+   o.connect(g);g.connect(actx.destination);o.start(t+d);o.stop(t+d+.18)})}catch(_){}
+}
+function pickMember(ts){
+ return new Promise(res=>{
+  const o=el('div','modal'),c=el('div','mcard'),l=el('div','mlist'),a=el('div','macts'),no=el('button','btn ghost','Cancel');no.type='button';
+  const k=e=>{if(e.key==='Escape')done(null)},done=v=>{o.remove();removeEventListener('keydown',k);res(v)};
+  ts.forEach(t=>{const b=el('button','btn ghost');b.type='button';b.appendChild(svg('user'));b.appendChild(el('span','',t.n));b.onclick=()=>done(t);l.appendChild(b)});
+  no.onclick=()=>done(null);o.onclick=e=>{if(e.target===o)done(null)};addEventListener('keydown',k);
+  c.appendChild(el('h3','','Send an alarm'));c.appendChild(el('p','','Who do you want to wake?'));c.appendChild(l);a.appendChild(no);c.appendChild(a);o.appendChild(c);document.body.appendChild(o);
+ });
+}
+async function sendAlarm(){
+ const w=Math.ceil((alarmCool-Date.now())/1000);
+ if(w>0)return toast('Please wait '+w+' s before sending another alarm');
+ const r=await fetch('/alarm/targets');if(r.status===401)return relogin();
+ if(!r.ok)return toast(await r.text()||'Could not load the members');
+ const ts=await r.json();
+ if(!ts.length)return toast('Nobody to wake yet: the others have to open Bunny Tale once first.');
+ const t=ts.length===1?ts[0]:await pickMember(ts);if(!t)return;
+ if(!await confirmBox('Wake '+t.n+' with an alarm?','Their phone (or browser) rings until they snooze or dismiss it, for at most 1:30.','Send alarm'))return;
+ const s=await fetch('/alarm/send',{method:'POST',headers:JH,body:JSON.stringify({to:t.u})});
+ if(s.status===401)return relogin();
+ if(!s.ok)return toast(await s.text()||'Could not send the alarm');
+ alarmCool=Date.now()+((await s.json()).cool||30)*1000;
+}
+$('#malarm').onclick=()=>{amenu.hidden=true;sendAlarm()};
+function showAlarm(a){
+ if(!a||a.to!==ME.uid)return;
+ if(alarmUi){if(alarmUi.id===a.id)return;alarmUi.close()}
+ const o=el('div','modal alarm'),c=el('div','mcard acard'),ic=el('div','aico'),acts=el('div','macts'),
+  sn=el('button','btn ghost','Snooze 5 min'),dm=el('button','btn','Dismiss');sn.type=dm.type='button';
+ ic.appendChild(svg('alarm'));c.appendChild(ic);c.appendChild(el('h3','','Alarm'));c.appendChild(el('p','',a.from+' is trying to wake you'));
+ acts.appendChild(sn);acts.appendChild(dm);c.appendChild(acts);o.appendChild(c);document.body.appendChild(o);
+ const title=document.title;let flip=0;
+ const ring=()=>{alarmBeep();try{if(navigator.vibrate)navigator.vibrate([500,300,500])}catch(_){}document.title=(flip^=1)?'⏰ Alarm!':title};
+ ring();const iv=setInterval(ring,1400),to=setTimeout(()=>answer('timeout'),(a.left||90)*1000);
+ const close=()=>{clearInterval(iv);clearTimeout(to);o.remove();document.title=title;try{if(navigator.vibrate)navigator.vibrate(0)}catch(_){}if(alarmUi&&alarmUi.id===a.id)alarmUi=null};
+ const answer=async act=>{close();
+  const r=await fetch('/alarm/respond',{method:'POST',headers:JH,body:JSON.stringify({id:a.id,ring:a.ring,action:act})}).catch(()=>null);
+  if(act!=='timeout'&&r&&!r.ok&&r.status!==410)toast(await r.text()||'Could not answer the alarm')};
+ sn.onclick=()=>answer('snooze');dm.onclick=()=>answer('dismiss');
+ alarmUi={id:a.id,close};
+ fetch('/alarm/respond',{method:'POST',headers:JH,body:JSON.stringify({id:a.id,ring:a.ring,action:'ring'})}).catch(()=>{});
+}
+async function checkAlarm(){try{const r=await fetch('/alarm/active');if(r.ok)showAlarm(await r.json())}catch(_){}}
 
 /* ---- voice messages: record, listen, then send (it goes out as a normal audio attachment) ---- */
 const recbar=$('#recbar');let rec=null;
@@ -2123,9 +2399,9 @@ $('#setb').onclick=settings;
 /* ---- live connection ---- */
 function connect(){
  if(es){es.onopen=es.onmessage=es.onerror=null;es.close()}
- const me=es=new EventSource('/events?cid='+cid+'&v='+(document.hidden?0:1));
+ const me=es=new EventSource('/events?cid='+cid+'&v='+(away()?0:1)+(APP?'&app=1':''));
  lastEv=Date.now();
- me.onopen=()=>{lastEv=Date.now();st.classList.add('on');reconnecting=false;if(opened)sync();opened=true;flushWait=3000;flush()};
+ me.onopen=()=>{lastEv=Date.now();st.classList.add('on');reconnecting=false;if(opened)sync();opened=true;flushWait=3000;flush();checkAlarm()};
  me.onmessage=e=>{
   lastEv=Date.now();st.classList.add('on');
   let ev;try{ev=JSON.parse(e.data)}catch(_){return}
@@ -2137,6 +2413,8 @@ function connect(){
   else if(ev.t==='edit')applyEdit(ev.id,ev.x,ev.e);
   else if(ev.t==='heart'){const r=rows.get(ev.id);if(r){r._h=ev.h;paintHearts(r)}}
   else if(ev.t==='wipe'){clearAll();lockInput(ev.lock||5)}
+  else if(ev.t==='alarm')showAlarm(ev.a);
+  else if(ev.t==='alarm_end'){if(alarmUi&&alarmUi.id===ev.id)alarmUi.close()}
   else if(ev.t==='nick'){document.querySelectorAll('.who,.qwho').forEach(w=>{if(w.dataset.u===ev.u)w.textContent=ev.s});if(ev.u===ME.uid)ME.name=ev.s}
  };
  me.onerror=async()=>{
@@ -2151,7 +2429,8 @@ setInterval(()=>{if(opened&&stale()){st.classList.remove('on');connect()}},10000
 const wake=()=>{if(opened){if(stale())connect();sync();flushWait=3000;flush()}};
 addEventListener('online',wake);addEventListener('pageshow',wake);
 document.addEventListener('visibilitychange',()=>{
- fetch('/presence',{method:'POST',headers:JH,keepalive:true,body:JSON.stringify({cid,visible:!document.hidden})}).catch(()=>{});
+ if(!document.hidden)appBg=false;
+ presence();
  if(!document.hidden)wake();
 });
 /* size the app to what is really visible; also at load and a few times while mobile browsers settle their viewport */
@@ -2204,7 +2483,7 @@ async function takeShared(){
 })();
 """
 
-SW_JS = r"""const C = 'bunnychat-v2', OFF = '/offline';
+SW_JS = r"""const C = 'bunnychat-v3', OFF = '/offline';
 self.addEventListener('install', e => e.waitUntil(caches.open(C).then(c => c.add(OFF)).then(() => self.skipWaiting())));
 self.addEventListener('activate', e => e.waitUntil(caches.keys().then(ks => Promise.all(ks.filter(k => k !== C).map(k => caches.delete(k)))).then(() => self.clients.claim())));
 self.addEventListener('fetch', e => {
@@ -2230,8 +2509,15 @@ self.addEventListener('fetch', e => {
 self.addEventListener('push', e => {
   let d = {};
   try { d = e.data.json(); } catch (_) {}
-  e.waitUntil(self.registration.showNotification(d.title || 'Bunny Tale', {
-    body: d.body || 'New message', icon: '/icon-192.png', tag: 'bunnychat', renotify: true, data: { url: '/' }}));
+  e.waitUntil((async () => {
+    if (d.alarm) return self.registration.showNotification(d.title || 'Alarm', {
+      body: d.body || 'Someone is trying to wake you', icon: '/icon-192.png', tag: 'bunnyalarm', renotify: true,
+      requireInteraction: true, vibrate: [500, 300, 500, 300, 500], data: { url: '/' }});
+    const cs = await clients.matchAll({ type: 'window', includeUncontrolled: true });
+    if (cs.some(c => c.visibilityState === 'visible' && c.focused)) return; // the chat is in front of the user right now
+    return self.registration.showNotification(d.title || 'Bunny Tale', {
+      body: d.body || 'New message', icon: '/icon-192.png', tag: 'bunnychat', renotify: true, data: { url: '/' }});
+  })());
 });
 self.addEventListener('notificationclick', e => {
   e.notification.close();
@@ -2460,7 +2746,9 @@ def index():
     try:
         m = master()
         uid = uid_of(s["email"])
-        me = {"uid": uid, "name": nick_map(m).get(uid) or s["name"], "vapid": vapid()[1], "fcm": bool(FCM_SA), "gate": gate_on(), "sound": SOUND_URL,
+        with conn() as c:  # known members: who can be woken with an alarm
+            c.execute("INSERT OR REPLACE INTO members VALUES(?,?)", (uid, seal(m, s["name"].encode())))
+        me = {"uid": uid, "name": nick_map(m).get(uid) or s["name"], "vapid": vapid()[1], "fcm": fcm_on(), "gate": gate_on(), "sound": SOUND_URL,
               "gif": {"giphy": {"key": GIPHY_KEY, "rating": GIPHY_RATING} if GIPHY_KEY else None,
                       "klipy": {"key": KLIPY_KEY, "rating": GIPHY_RATING} if KLIPY_KEY else None}}
     except AuthError:
@@ -2615,6 +2903,8 @@ def edit():  # change the text of your own message (the same message key is kept
             p = json.loads(unseal(mk, unseal(m, bytes(row[4]))))
         except (InvalidTag, ValueError):
             return "Message could not be read", 500
+        if p.get("x"):
+            return "This message cannot be edited", 400
         if not text and not p.get("a") and not p.get("g"):
             return "Empty message", 400
         if text == p.get("t", ""):
@@ -2800,7 +3090,8 @@ def events():
                         q0.put_nowait(None)
                     except queue.Full:
                         pass
-        SUBS[q] = {"uid": uid, "cid": cid, "visible": request.args.get("v", "1") == "1"}
+        SUBS[q] = {"uid": uid, "cid": cid}
+    pres_set(cid, uid, request.args.get("v", "1") == "1", request.args.get("app") == "1")
 
     def gen():
         born = time.time()
@@ -2828,18 +3119,100 @@ def events():
 
 
 @app.route("/presence", methods=["POST"])
-def presence():  # is this page in front of the user? (pushes only go to users who are not looking)
+def presence():  # heartbeat: is this page in front of the user? (pushes only go to users who are not looking)
     s = auth()
     if not s:
         return "", 401
     j = request.get_json(silent=True) or {}
-    cid = str(j.get("cid", ""))[:64]
-    if cid:
-        with _slock:
-            for info in SUBS.values():
-                if info["cid"] == cid:
-                    info["visible"] = bool(j.get("visible"))
+    try:
+        uid = uid_of(s["email"])
+    except Exception as e:
+        return fail(e)
+    pres_set(str(j.get("cid", ""))[:64], uid, j.get("visible"), j.get("app") if "app" in j else None)
     return "", 204
+
+
+# ---- alarms ----
+@app.route("/alarm/targets")
+def alarm_targets():
+    s = auth()
+    if not s:
+        return "", 401
+    try:
+        m = master()
+        uid = uid_of(s["email"])
+    except Exception as e:
+        return fail(e)
+    names = member_names(m)
+    return jsonify(sorted(({"u": u, "n": n} for u, n in names.items() if u != uid), key=lambda x: x["n"].lower()))
+
+
+@app.route("/alarm/send", methods=["POST"])
+def alarm_send():
+    s = auth()
+    if not s:
+        return "", 401
+    to = str((request.get_json(silent=True) or {}).get("to", ""))
+    try:
+        m = master()
+        uid = uid_of(s["email"])
+    except Exception as e:
+        return fail(e)
+    names = member_names(m)
+    if to == uid or to not in names:
+        return "Unknown member", 400
+    with _alock:
+        wait = ALARM_COOLDOWN - (time.time() - LAST_ALARM.get(uid, 0))
+        if wait > 0:
+            return f"Please wait {int(wait) + 1} s before sending another alarm", 429
+        if any(a["to"] == to for a in ALARMS.values()):
+            return f"An alarm for {names[to]} is already running", 409
+        LAST_ALARM[uid] = time.time()
+        a = {"id": secrets.token_hex(8), "tok": secrets.token_urlsafe(24), "frm": uid, "frm_name": names.get(uid) or s["name"],
+             "to": to, "to_name": names[to], "state": "new", "ring": 0, "via": None, "rang_at": 0, "acked": 0}
+        ALARMS[a["id"]] = a
+    print(f"[alarm] {a['id'][:6]} sent", flush=True)
+    post_system(uid, a["frm_name"], {"k": "sent", "n": a["to_name"]})
+    alarm_ring(a)
+    return jsonify({"ok": True, "cool": ALARM_COOLDOWN})
+
+
+@app.route("/alarm/respond", methods=["POST"])
+def alarm_respond():  # from a browser (session) or the Android app (the alarm's own token, no cookies needed)
+    j = request.get_json(silent=True) or {}
+    act, a = j.get("action"), ALARMS.get(str(j.get("id", "")))
+    if act not in ("ring", "snooze", "dismiss", "timeout"):
+        return "Bad request", 400
+    if not a:
+        return "This alarm is over", 410
+    if not hmac.compare_digest(str(j.get("tok", "")), a["tok"]):
+        s = auth()
+        try:
+            if not s or uid_of(s["email"]) != a["to"]:
+                return "", 403
+        except Exception as e:
+            return fail(e)
+    ring = j.get("ring")
+    if a["state"] != "ringing" or (ring is not None and str(ring) != str(a["ring"])):
+        return "This alarm is over", 410
+    if act == "ring":
+        a["acked"] = a["acked"] or time.time()
+        print(f"[alarm] {a['id'][:6]} ring {a['ring']}: ringing on a device", flush=True)
+        return "", 204
+    return ("", 204) if alarm_end(a, act) else ("This alarm is over", 410)
+
+
+@app.route("/alarm/active")
+def alarm_active():  # a browser that (re)connects picks up an alarm that is ringing for it
+    s = auth()
+    if not s:
+        return "", 401
+    try:
+        uid = uid_of(s["email"])
+    except Exception as e:
+        return fail(e)
+    a = next((a for a in list(ALARMS.values()) if a["to"] == uid and a["state"] == "ringing" and a["via"] == "web"), None)
+    return jsonify(alarm_pub(a) if a else None)
 
 
 # ---- push subscriptions ----
@@ -2866,14 +3239,16 @@ def push_subscribe():
 
 
 @app.route("/push/fcm", methods=["POST"])
-def push_fcm():  # Android app: register / remove an FCM token
+def push_fcm():  # Android app: register / remove an FCM token. msgs=false: alarms only (notifications switched off)
     s = auth()
     if not s:
         return "", 401
     j = request.get_json(silent=True) or {}
     tok = str(j.get("token", ""))
-    if not FCM_SA or not 20 < len(tok) < 400:
-        return "FCM is not configured", 400
+    if not fcm_on():
+        return "FCM is not configured on the server", 400
+    if not 20 < len(tok) < 400:
+        return "Invalid token", 400
     try:
         m = master()
         uid = uid_of(s["email"])
@@ -2883,9 +3258,11 @@ def push_fcm():  # Android app: register / remove an FCM token
     with conn() as c:
         if j.get("off"):
             c.execute("DELETE FROM push WHERE eid=? AND uid=?", (eid, uid))
+            print(f"[fcm] app {eid[:8]} unregistered", flush=True)
         else:
-            c.execute("INSERT OR REPLACE INTO push VALUES(?,?,?)", (eid, uid, seal(m, json.dumps({"fcm": tok}).encode())))
-            print("[fcm] token registered", flush=True)
+            msgs = j.get("msgs") is not False
+            c.execute("INSERT OR REPLACE INTO push VALUES(?,?,?)", (eid, uid, seal(m, json.dumps({"fcm": tok, "msgs": msgs}).encode())))
+            print(f"[fcm] app {eid[:8]} registered ({'messages + alarms' if msgs else 'alarms only'})", flush=True)
     return "", 204
 
 
@@ -3044,3 +3421,5 @@ try:
 except OSError:
     NOTIF = b""
 SOUND_URL = f"/notification.wav?v={hashlib.sha1(NOTIF).hexdigest()[:8]}" if NOTIF else None
+if FCM_SA and fcm_on():
+    print(f"[fcm] enabled for Firebase project {fcm_sa()['project_id']}", flush=True)

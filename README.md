@@ -18,6 +18,7 @@ It is the sibling of *Bunny Interactive* (the file-manager web client) and share
 - Replies (also by swiping), hearts, delete own messages, nicknames, link previews and tap-to-load embeds
 - Message sound while the app is open (per-device switch in Settings)
 - Opt-in web push notifications (own VAPID / RFC 8291 implementation, no third-party SDK)
+- Alarms: wake another member ("Send alarm" in the attach menu, 30 s cooldown). It rings full screen in the Android app, or in the browser when they have no app; snooze (5 min), dismiss and timeout (1:30) are posted to the chat
 - "Wipe chat" for any user, automatic wipe after inactivity
 - Optional fake "502 Bad Gateway" screen, opened by tapping its icon three times
 - Installable PWA (manifest, service worker, offline page)
@@ -47,6 +48,10 @@ It is the sibling of *Bunny Interactive* (the file-manager web client) and share
 **Editing.** `POST /edit` (own messages only) re-encrypts the body under the message's existing key and stores an edit timestamp; the old ciphertext is zeroed (`secure_delete`, WAL checkpoint). Clients update live through an `edit` event.
 
 **Outbox.** Every message is queued in the browser (`localStorage`, survives reloads) and sent in order with a client-generated id. The server remembers the last 500 ids per sender (in memory), so a retry after a lost response returns the original message instead of posting a duplicate. Network errors, timeouts (20 s), 5xx and the post-wipe lock keep the message pending with backoff (3 s up to 30 s); definitive errors drop it with a notice. Edits and deletes need a connection and are not queued.
+
+**Push and presence.** A page that is in front of the user sends a heartbeat every 20 s (`/presence`); the Android app also reports when it goes to the background. Pushes skip users with a heartbeat from a visible page in the last 50 s (any of their devices). The app additionally never shows a message notification while the chat is on screen. Server logs show every decision (`[push]`, `[fcm]` lines).
+
+**Alarms.** `POST /alarm/send` creates an alarm in memory (one per woken member, 30 s cooldown per sender). If the member has the Android app registered, it goes only there via FCM (looping alarm sound, full-screen activity over the lock screen); otherwise it goes to their open browsers (SSE) plus a web push. The device reports `ring`, then `snooze` / `dismiss` / `timeout`; the app answers with a per-alarm token, so it needs no cookies. A snooze rings again after 5 minutes. If no device answers, the server ends it itself (`timeout`, or `missed` when nothing ever rang). Alarms are lost on a server restart.
 
 **Wipe.** Deletes all rows and attachments, removes `.bunnyc`, runs `VACUUM` (SQLite runs with `secure_delete`), and locks writing for 5 seconds. A janitor thread does the same after `AUTOWIPE_HOURS` without activity.
 
@@ -130,4 +135,4 @@ The PWA/browser version is unaffected. For more reliable notifications on Androi
 4. GitHub → Settings: secrets `GOOGLE_SERVICES_JSON`, `KEYSTORE_B64` (`base64 -w0 release.jks`), `KEYSTORE_PASSWORD`; variable `BUNNY_TALE_URL`.
 5. Run the *Android app (optional)* workflow and install the APK from its artifacts. Enable *Notifications* in the app's settings.
 
-The workflow is manual only. In the app, notifications go through FCM instead of Web Push.
+The workflow is manual only. In the app, notifications go through FCM instead of Web Push. The app always registers for alarms, even with notifications off; logging out removes the registration. Android 8 or newer is required. On Android 14+, the app asks once for the *full-screen notifications* permission, which full-screen alarms need. The attach buttons offer the camera (photo / video) next to the file and gallery pickers.

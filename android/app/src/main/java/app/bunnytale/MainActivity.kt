@@ -2,11 +2,16 @@ package app.bunnytale
 
 import android.Manifest
 import android.annotation.SuppressLint
+import android.app.AlertDialog
+import android.app.NotificationManager
+import android.content.ClipData
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.provider.MediaStore
+import android.provider.Settings
 import android.webkit.JavascriptInterface
 import android.webkit.PermissionRequest
 import android.webkit.ValueCallback
@@ -16,15 +21,24 @@ import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.activity.OnBackPressedCallback
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import androidx.core.content.FileProvider
 import com.google.firebase.messaging.FirebaseMessaging
+import java.io.File
+
+object AppState {
+    @Volatile var foreground = false  // the chat is on screen: no message notifications, alarms open directly
+}
 
 class MainActivity : AppCompatActivity() {
     private lateinit var web: WebView
     private var chooser: ValueCallback<Array<Uri>>? = null
     private var micRequest: PermissionRequest? = null
+    private var camFiles: List<Pair<File, Uri>> = emptyList()  // where the camera was asked to save a photo / video
+    private val pick = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { r -> deliverFiles(r.resultCode, r.data) }
 
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -48,7 +62,7 @@ class MainActivity : AppCompatActivity() {
         web.webChromeClient = object : WebChromeClient() {
             override fun onShowFileChooser(v: WebView, cb: ValueCallback<Array<Uri>>, p: FileChooserParams): Boolean {
                 chooser?.onReceiveValue(null); chooser = cb
-                return try { startActivityForResult(p.createIntent(), 7); true } catch (e: Exception) { chooser = null; false }
+                return try { pick.launch(buildChooser(p)); true } catch (e: Exception) { chooser = null; false }
             }
             override fun onPermissionRequest(r: PermissionRequest) {
                 runOnUiThread {
@@ -66,22 +80,101 @@ class MainActivity : AppCompatActivity() {
         if (Build.VERSION.SDK_INT >= 33 &&
             ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED)
             ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.POST_NOTIFICATIONS), 9)
-        if (savedInstanceState == null) web.loadUrl(BuildConfig.SERVER_URL.ifEmpty { "about:blank" }) else web.restoreState(savedInstanceState)
+        askFullScreen()
+        if (savedInstanceState == null) {
+            File(cacheDir, "camera").listFiles()?.forEach { it.delete() }  // photos from earlier sessions were uploaded or dropped
+            web.loadUrl(BuildConfig.SERVER_URL.ifEmpty { "about:blank" })
+        } else web.restoreState(savedInstanceState)
+    }
+
+    /** Android 14+: full-screen alarms need a special permission, granted in the system settings. Asked once. */
+    private fun askFullScreen() {
+        if (Build.VERSION.SDK_INT < 34) return
+        val prefs = getSharedPreferences("app", MODE_PRIVATE)
+        if (getSystemService(NotificationManager::class.java).canUseFullScreenIntent() || prefs.getBoolean("fsiAsked", false)) return
+        prefs.edit().putBoolean("fsiAsked", true).apply()
+        AlertDialog.Builder(this)
+            .setTitle("Full-screen alarms")
+            .setMessage("To wake you with a full-screen alarm when someone sends one, Bunny Tale needs the \"full-screen notifications\" permission.")
+            .setPositiveButton("Open settings") { _, _ ->
+                try { startActivity(Intent(Settings.ACTION_MANAGE_APP_USE_FULL_SCREEN_INTENT, Uri.parse("package:$packageName"))) } catch (_: Exception) {}
+            }
+            .setNegativeButton("Not now", null)
+            .show()
+    }
+
+    /** Like Chrome's picker: the file / gallery picker, with "take a photo" and "record a video" next to it. */
+    private fun buildChooser(p: WebChromeClient.FileChooserParams): Intent {
+        val types = p.acceptTypes.flatMap { it.split(',') }.map { it.trim().lowercase() }.filter { it.isNotEmpty() }
+        val content = Intent(Intent.ACTION_GET_CONTENT).addCategory(Intent.CATEGORY_OPENABLE).apply {
+            type = if (types.size == 1) types[0] else "*/*"
+            if (types.size > 1) putExtra(Intent.EXTRA_MIME_TYPES, types.toTypedArray())
+            putExtra(Intent.EXTRA_ALLOW_MULTIPLE, p.mode == WebChromeClient.FileChooserParams.MODE_OPEN_MULTIPLE)
+        }
+        val any = types.isEmpty() || "*/*" in types
+        val cams = mutableListOf<Intent>()
+        val files = mutableListOf<Pair<File, Uri>>()
+        if (any || types.any { it.startsWith("image/") }) camIntent(MediaStore.ACTION_IMAGE_CAPTURE, "IMG", ".jpg")?.let { cams += it.first; files += it.second }
+        if (any || types.any { it.startsWith("video/") }) camIntent(MediaStore.ACTION_VIDEO_CAPTURE, "VID", ".mp4")?.let { cams += it.first; files += it.second }
+        camFiles = files
+        return Intent.createChooser(content, "Attach").putExtra(Intent.EXTRA_INITIAL_INTENTS, cams.toTypedArray())
+    }
+
+    private fun camIntent(action: String, prefix: String, ext: String): Pair<Intent, Pair<File, Uri>>? {
+        val i = Intent(action)
+        if (i.resolveActivity(packageManager) == null) return null
+        val dir = File(cacheDir, "camera").apply { mkdirs() }
+        val f = File(dir, "${prefix}_${System.currentTimeMillis()}$ext")
+        val uri = FileProvider.getUriForFile(this, "$packageName.files", f)
+        i.putExtra(MediaStore.EXTRA_OUTPUT, uri)
+        i.clipData = ClipData.newRawUri("", uri)
+        i.addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION or Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        return i to (f to uri)
+    }
+
+    /** Pickers return one file in data, several in clipData (multi-select: "Attach media"); the camera writes to our file. */
+    private fun deliverFiles(code: Int, data: Intent?) {
+        val cb = chooser ?: return
+        chooser = null
+        val out = mutableListOf<Uri>()
+        if (code == RESULT_OK) {
+            val own = camFiles.map { it.second }.toSet()
+            data?.clipData?.let { c -> for (i in 0 until c.itemCount) c.getItemAt(i).uri?.let { if (it !in own) out += it } }
+            data?.data?.let { if (it !in own && it !in out) out += it }
+            camFiles.filter { it.first.length() > 0 }.forEach { out += it.second }
+        }
+        camFiles.filter { it.first.length() == 0L }.forEach { it.first.delete() }
+        camFiles = emptyList()
+        cb.onReceiveValue(if (out.isEmpty()) null else out.toTypedArray())
     }
 
     inner class Bridge {
         @JavascriptInterface
         fun requestToken() {  // answers by calling window.__fcm(token) in the page
             FirebaseMessaging.getInstance().token.addOnSuccessListener { t ->
+                getSharedPreferences("app", MODE_PRIVATE).edit().putString("fcmTok", t).apply()
                 web.post { web.evaluateJavascript("window.__fcm&&window.__fcm('$t')", null) }
             }
         }
+
+        @JavascriptInterface
+        fun setMessages(on: Boolean) {  // remembered for a token refresh while the app is closed
+            getSharedPreferences("app", MODE_PRIVATE).edit().putBoolean("msgs", on).apply()
+        }
     }
 
-    @Deprecated("Deprecated in Java")
-    override fun onActivityResult(req: Int, res: Int, data: Intent?) {
-        if (req == 7) { chooser?.onReceiveValue(WebChromeClient.FileChooserParams.parseResult(res, data)); chooser = null }
-        else super.onActivityResult(req, res, data)
+    override fun onResume() {
+        super.onResume()
+        AppState.foreground = true
+        web.onResume()
+        web.evaluateJavascript("window.__appVis&&window.__appVis(true)", null)
+    }
+
+    override fun onPause() {
+        AppState.foreground = false
+        web.evaluateJavascript("window.__appVis&&window.__appVis(false)", null)  // the server stops treating the chat as open
+        web.onPause()
+        super.onPause()
     }
 
     override fun onRequestPermissionsResult(req: Int, perms: Array<out String>, results: IntArray) {

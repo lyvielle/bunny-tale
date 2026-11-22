@@ -9,7 +9,7 @@ android {
     compileSdk = 34
     defaultConfig {
         applicationId = "app.bunnytale"
-        minSdk = 24
+        minSdk = 26  // Android 8: notification channels, foreground services
         targetSdk = 34
         versionCode = (System.getenv("VERSION_CODE") ?: "1").toInt()
         versionName = "1.0"
