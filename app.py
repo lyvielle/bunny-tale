@@ -745,11 +745,14 @@ def notify(sender_uid, name, atts, text, gif=False):
     payload = json.dumps({"title": "Bunny Tale", "body": f"{name} {what}"}).encode()
     for eid, uid, blob in rows:
         if uid == sender_uid or uid in here:
+            print(f"[push] skipped a device ({'sender' if uid == sender_uid else 'chat is open'})", flush=True)
             continue
         try:
             sub = json.loads(unseal(m, bytes(blob)))
             if "fcm" in sub:
-                if FCM_SA and fcm_send(sub["fcm"], {"type": "message", "title": "Bunny Tale", "body": f"{name} {what}"}) == 404:  # token no longer valid
+                st = fcm_send(sub["fcm"], {"type": "message", "title": "Bunny Tale", "body": f"{name} {what}"}) if FCM_SA else None
+                print(f"[fcm] sent to a device, status {st}", flush=True)
+                if st == 404:  # token no longer valid
                     with conn() as c:
                         c.execute("DELETE FROM push WHERE eid=?", (eid,))
                 continue
