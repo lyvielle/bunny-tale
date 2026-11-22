@@ -9,3 +9,6 @@ android/.gradle/
 android/build/
 android/app/build/
 *.jks
+# Firebase credentials kept locally (never commit)
+/google-services.json
+/bunny-tale-*.json
