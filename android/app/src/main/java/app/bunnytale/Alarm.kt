@@ -81,17 +81,18 @@ object Alarm {
     }
 
     /** The user (or the timeout) answered: tell the server, stop ringing. */
-    fun answer(ctx: Context, action: String) = h.post {
+    fun answer(ctx: Context, action: String, mins: Int? = null) = h.post {
         if (id == null) return@post
-        respond(action)
+        respond(action, mins)
         release(ctx)
     }
 
     /** Answered on another device or over on the server: stop without reporting. */
     fun stop(ctx: Context, which: String?) = h.post { if (id != null && (which == null || which == id)) release(ctx) }
 
-    private fun respond(action: String) =
-        Api.post("/alarm/respond", JSONObject().put("id", id).put("tok", tok).put("ring", ring).put("action", action))
+    private fun respond(action: String, mins: Int? = null) =
+        Api.post("/alarm/respond", JSONObject().put("id", id).put("tok", tok).put("ring", ring).put("action", action)
+            .apply { if (mins != null) put("mins", mins) })
 
     private fun sound(ctx: Context) {
         val attrs = AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_ALARM).setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION).build()
@@ -163,6 +164,6 @@ class AlarmService : Service() {
 /** Snooze / Dismiss buttons on the notification. */
 class AlarmActions : BroadcastReceiver() {
     override fun onReceive(ctx: Context, i: Intent) {
-        when (i.action) { "snooze", "dismiss" -> Alarm.answer(ctx.applicationContext, i.action!!) }
+        when (i.action) { "snooze" -> Alarm.answer(ctx.applicationContext, "snooze", 5); "dismiss" -> Alarm.answer(ctx.applicationContext, "dismiss") }
     }
 }

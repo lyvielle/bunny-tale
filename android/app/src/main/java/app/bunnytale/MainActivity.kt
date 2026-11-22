@@ -21,6 +21,7 @@ import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.activity.OnBackPressedCallback
+import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
@@ -39,6 +40,9 @@ class MainActivity : AppCompatActivity() {
     private var micRequest: PermissionRequest? = null
     private var camFiles: List<Pair<File, Uri>> = emptyList()  // where the camera was asked to save a photo / video
     private val pick = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { r -> deliverFiles(r.resultCode, r.data) }
+    // "Attach media": the system photo / video picker only (falls back to the document picker on old phones)
+    private val pickMedia = registerForActivityResult(ActivityResultContracts.PickMultipleVisualMedia(10)) { deliverUris(it) }
+    private val pickOneMedia = registerForActivityResult(ActivityResultContracts.PickVisualMedia()) { deliverUris(listOfNotNull(it)) }
 
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -62,7 +66,7 @@ class MainActivity : AppCompatActivity() {
         web.webChromeClient = object : WebChromeClient() {
             override fun onShowFileChooser(v: WebView, cb: ValueCallback<Array<Uri>>, p: FileChooserParams): Boolean {
                 chooser?.onReceiveValue(null); chooser = cb
-                return try { pick.launch(buildChooser(p)); true } catch (e: Exception) { chooser = null; false }
+                return try { launchPicker(p); true } catch (e: Exception) { chooser = null; false }
             }
             override fun onPermissionRequest(r: PermissionRequest) {
                 runOnUiThread {
@@ -101,6 +105,25 @@ class MainActivity : AppCompatActivity() {
             }
             .setNegativeButton("Not now", null)
             .show()
+    }
+
+    private fun launchPicker(p: WebChromeClient.FileChooserParams) {
+        val types = p.acceptTypes.flatMap { it.split(',') }.map { it.trim().lowercase() }.filter { it.isNotEmpty() }
+        val media = types.isNotEmpty() && types.all { it.startsWith("image/") || it.startsWith("video/") }
+        if (!media) { pick.launch(buildChooser(p)); return }
+        val kind = when {
+            types.all { it.startsWith("image/") } -> ActivityResultContracts.PickVisualMedia.ImageOnly
+            types.all { it.startsWith("video/") } -> ActivityResultContracts.PickVisualMedia.VideoOnly
+            else -> ActivityResultContracts.PickVisualMedia.ImageAndVideo
+        }
+        val req = PickVisualMediaRequest.Builder().setMediaType(kind).build()
+        if (p.mode == WebChromeClient.FileChooserParams.MODE_OPEN_MULTIPLE) pickMedia.launch(req) else pickOneMedia.launch(req)
+    }
+
+    private fun deliverUris(uris: List<Uri>) {
+        val cb = chooser ?: return
+        chooser = null
+        cb.onReceiveValue(if (uris.isEmpty()) null else uris.toTypedArray())
     }
 
     /** Like Chrome's picker: the file / gallery picker, with "take a photo" and "record a video" next to it. */

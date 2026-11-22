@@ -844,7 +844,8 @@ def notify(sender_uid, name, atts, text, gif=False, what=None):
 
 # ---- alarms: wake another member. The Android app gets it via FCM (full screen); browsers only when no app is registered ----
 ALARM_RING = 90  # seconds a device rings before it gives up and reports "timeout"
-ALARM_SNOOZE = 5 * 60
+ALARM_SNOOZE = 5 * 60  # default snooze
+SNOOZE_MINS = (5, 10, 30, 60)  # what the alarm screens offer
 ALARM_COOLDOWN = 30  # per sender
 ALARMS = {}  # alarm id -> {id, tok, frm, frm_name, to, to_name, state, ring, via, rang_at, acked}
 LAST_ALARM = {}  # sender uid -> time of the last alarm
@@ -936,7 +937,7 @@ def alarm_watch(a, ring):
     alarm_end(a, "timeout" if a["acked"] else "missed")
 
 
-def alarm_end(a, action):
+def alarm_end(a, action, mins=None):
     with _alock:
         if a["state"] != "ringing":
             return False
@@ -951,11 +952,13 @@ def alarm_end(a, action):
             if "fcm" in sub:
                 PUSHPOOL.submit(fcm_send, sub["fcm"], {"type": "alarm_stop", "id": a["id"]}, 600)
     x = {"k": action, "by": a["frm_name"]}
-    what = {"snooze": f"snoozed the alarm for {ALARM_SNOOZE // 60} minutes", "dismiss": "dismissed the alarm",
+    mins = mins if mins in SNOOZE_MINS else ALARM_SNOOZE // 60
+    span = "1 hour" if mins == 60 else f"{mins} minutes"
+    what = {"snooze": f"snoozed the alarm for {span}", "dismiss": "dismissed the alarm",
             "timeout": "did not react to the alarm", "missed": "could not be reached by the alarm"}[action]
     if action == "snooze":
-        x["m"] = ALARM_SNOOZE // 60
-        threading.Timer(ALARM_SNOOZE, alarm_ring, (a,)).start()
+        x["m"] = mins
+        threading.Timer(mins * 60, alarm_ring, (a,)).start()
     post_system(a["to"], a["to_name"], x, what)
     return True
 
@@ -1387,7 +1390,9 @@ body.drag #drop{display:grid}
 .mlist{display:grid;gap:6px;margin:0 0 18px}.mlist button{justify-content:flex-start;width:100%}
 .modal.alarm{background:#000e;z-index:95}.acard{text-align:center;max-width:380px}
 .acard .aico{display:grid;place-items:center;margin:4px auto 14px;width:84px;height:84px;border-radius:50%;background:#f59e0b22;color:#f59e0b;animation:aring 1s ease-in-out infinite}
-.acard .aico svg{width:46px;height:46px}.acard h3{font-size:22px}.acard .macts{justify-content:center}.acard .btn{min-width:120px;padding:12px 18px}
+.acard .aico svg{width:46px;height:46px}.acard h3{font-size:22px}.acard .macts{justify-content:center}.acard .btn{border-radius:999px;padding:12px 18px}
+.acard .alab{color:var(--mute);font-size:13px;margin:4px 0 8px}.acard .asnz{display:grid;grid-template-columns:repeat(4,1fr);gap:8px}
+.acard .asnz .btn{padding:12px 4px;justify-content:center}.acard .adis{width:100%;margin-top:14px;justify-content:center;padding:14px}
 @keyframes aring{0%,100%{transform:rotate(0)}20%{transform:rotate(-14deg)}40%{transform:rotate(14deg)}60%{transform:rotate(-8deg)}80%{transform:rotate(8deg)}}
 @media (prefers-reduced-motion:reduce){.acard .aico{animation:none}}
 .modal{position:fixed;inset:0;background:#000b;display:grid;place-items:center;z-index:80;padding:16px}
@@ -1794,7 +1799,7 @@ function addPreview(host,u){
  box._go=async()=>{const j=await pvFetch(u);if(!j||!j.ok)return;box.appendChild(card(j,u,pvCol()));if(stick)toBottom()};
  pvIO.observe(box);
 }
-const sysText=m=>{const x=m.x||{};return x.k==='sent'?m.s+' sent an alarm to '+(x.n||'someone'):x.k==='snooze'?m.s+' snoozed the alarm ('+(x.m||5)+' min)':
+const sysText=m=>{const x=m.x||{};return x.k==='sent'?m.s+' sent an alarm to '+(x.n||'someone'):x.k==='snooze'?m.s+' snoozed the alarm for '+((x.m||5)>=60?'1 hour':(x.m||5)+' minutes'):
  x.k==='dismiss'?m.s+' dismissed the alarm':x.k==='timeout'?m.s+' did not react to the alarm (timed out)':x.k==='missed'?m.s+' could not be reached by the alarm':''};
 function build(m){
  if(m.x){const row=el('div','sysrow');row.dataset.id=m.id;row._m=m;row.appendChild(svg('alarm'));row.appendChild(el('span','',sysText(m)));row.appendChild(el('span','tm',fmt(m.ts)));return row}
@@ -2136,18 +2141,20 @@ $('#malarm').onclick=()=>{amenu.hidden=true;sendAlarm()};
 function showAlarm(a){
  if(!a||a.to!==ME.uid)return;
  if(alarmUi){if(alarmUi.id===a.id)return;alarmUi.close()}
- const o=el('div','modal alarm'),c=el('div','mcard acard'),ic=el('div','aico'),acts=el('div','macts'),
-  sn=el('button','btn ghost','Snooze 5 min'),dm=el('button','btn','Dismiss');sn.type=dm.type='button';
+ const o=el('div','modal alarm'),c=el('div','mcard acard'),ic=el('div','aico'),acts=el('div','macts asnz'),
+  dm=el('button','btn adis','Dismiss');dm.type='button';
  ic.appendChild(svg('alarm'));c.appendChild(ic);c.appendChild(el('h3','','Alarm'));c.appendChild(el('p','',a.from+' is trying to wake you'));
- acts.appendChild(sn);acts.appendChild(dm);c.appendChild(acts);o.appendChild(c);document.body.appendChild(o);
+ c.appendChild(el('div','alab','Snooze'));
+ [[5,'5 min'],[10,'10 min'],[30,'30 min'],[60,'1 h']].forEach(([n,l])=>{const b=el('button','btn ghost',l);b.type='button';b.onclick=()=>answer('snooze',n);acts.appendChild(b)});
+ c.appendChild(acts);c.appendChild(dm);o.appendChild(c);document.body.appendChild(o);
  const title=document.title;let flip=0;
  const ring=()=>{alarmBeep();try{if(navigator.vibrate)navigator.vibrate([500,300,500])}catch(_){}document.title=(flip^=1)?'⏰ Alarm!':title};
  ring();const iv=setInterval(ring,1400),to=setTimeout(()=>answer('timeout'),(a.left||90)*1000);
  const close=()=>{clearInterval(iv);clearTimeout(to);o.remove();document.title=title;try{if(navigator.vibrate)navigator.vibrate(0)}catch(_){}if(alarmUi&&alarmUi.id===a.id)alarmUi=null};
- const answer=async act=>{close();
-  const r=await fetch('/alarm/respond',{method:'POST',headers:JH,body:JSON.stringify({id:a.id,ring:a.ring,action:act})}).catch(()=>null);
+ const answer=async(act,mins)=>{close();
+  const r=await fetch('/alarm/respond',{method:'POST',headers:JH,body:JSON.stringify({id:a.id,ring:a.ring,action:act,mins})}).catch(()=>null);
   if(act!=='timeout'&&r&&!r.ok&&r.status!==410)toast(await r.text()||'Could not answer the alarm')};
- sn.onclick=()=>answer('snooze');dm.onclick=()=>answer('dismiss');
+ dm.onclick=()=>answer('dismiss');
  alarmUi={id:a.id,close};
  fetch('/alarm/respond',{method:'POST',headers:JH,body:JSON.stringify({id:a.id,ring:a.ring,action:'ring'})}).catch(()=>{});
 }
@@ -3203,7 +3210,8 @@ def alarm_respond():  # from a browser (session) or the Android app (the alarm's
         a["acked"] = a["acked"] or time.time()
         print(f"[alarm] {a['id'][:6]} ring {a['ring']}: ringing on a device", flush=True)
         return "", 204
-    return ("", 204) if alarm_end(a, act) else ("This alarm is over", 410)
+    mins = j.get("mins") if isinstance(j.get("mins"), int) and not isinstance(j.get("mins"), bool) else None
+    return ("", 204) if alarm_end(a, act, mins) else ("This alarm is over", 410)
 
 
 @app.route("/alarm/active")

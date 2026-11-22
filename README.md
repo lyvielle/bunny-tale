@@ -18,7 +18,7 @@ It is the sibling of *Bunny Interactive* (the file-manager web client) and share
 - Replies (also by swiping), hearts, delete own messages, nicknames, link previews and tap-to-load embeds
 - Message sound while the app is open (per-device switch in Settings)
 - Opt-in web push notifications (own VAPID / RFC 8291 implementation, no third-party SDK)
-- Alarms: wake another member ("Send alarm" in the attach menu, 30 s cooldown). It rings full screen in the Android app, or in the browser when they have no app; snooze (5 min), dismiss and timeout (1:30) are posted to the chat
+- Alarms: wake another member ("Send alarm" in the attach menu, 30 s cooldown). It rings full screen in the Android app, or in the browser when they have no app; snooze (5 min, 10 min, 30 min or 1 h), dismiss and timeout (1:30) are posted to the chat
 - "Wipe chat" for any user, automatic wipe after inactivity
 - Optional fake "502 Bad Gateway" screen, opened by tapping its icon three times
 - Installable PWA (manifest, service worker, offline page)
@@ -51,7 +51,7 @@ It is the sibling of *Bunny Interactive* (the file-manager web client) and share
 
 **Push and presence.** A page that is in front of the user sends a heartbeat every 20 s (`/presence`); the Android app also reports when it goes to the background. Pushes skip users with a heartbeat from a visible page in the last 50 s (any of their devices). The app additionally never shows a message notification while the chat is on screen. Server logs show every decision (`[push]`, `[fcm]` lines).
 
-**Alarms.** `POST /alarm/send` creates an alarm in memory (one per woken member, 30 s cooldown per sender). If the member has the Android app registered, it goes only there via FCM (looping alarm sound, full-screen activity over the lock screen); otherwise it goes to their open browsers (SSE) plus a web push. The device reports `ring`, then `snooze` / `dismiss` / `timeout`; the app answers with a per-alarm token, so it needs no cookies. A snooze rings again after 5 minutes. If no device answers, the server ends it itself (`timeout`, or `missed` when nothing ever rang). Alarms are lost on a server restart.
+**Alarms.** `POST /alarm/send` creates an alarm in memory (one per woken member, 30 s cooldown per sender). If the member has the Android app registered, it goes only there via FCM (looping alarm sound, full-screen activity over the lock screen); otherwise it goes to their open browsers (SSE) plus a web push. The device reports `ring`, then `snooze` / `dismiss` / `timeout`; the app answers with a per-alarm token, so it needs no cookies. A snooze rings again after the chosen time (5, 10, 30 or 60 minutes). If no device answers, the server ends it itself (`timeout`, or `missed` when nothing ever rang). Alarms are lost on a server restart.
 
 **Wipe.** Deletes all rows and attachments, removes `.bunnyc`, runs `VACUUM` (SQLite runs with `secure_delete`), and locks writing for 5 seconds. A janitor thread does the same after `AUTOWIPE_HOURS` without activity.
 

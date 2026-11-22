@@ -2,6 +2,7 @@ package app.bunnytale
 
 import android.graphics.Color
 import android.graphics.Typeface
+import android.graphics.drawable.GradientDrawable
 import android.os.Build
 import android.os.Bundle
 import android.view.Gravity
@@ -33,22 +34,35 @@ class AlarmActivity : AppCompatActivity() {
             if (bold) typeface = Typeface.DEFAULT_BOLD
             setPadding(0, (8 * dp).toInt(), 0, (8 * dp).toInt())
         }
-        fun button(label: String, bg: Int, action: String) = Button(this).apply {
-            text = label; textSize = 18f; setTextColor(Color.WHITE); setBackgroundColor(bg); isAllCaps = false
-            layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, (64 * dp).toInt()).apply { topMargin = (14 * dp).toInt() }
-            setOnClickListener { Alarm.answer(applicationContext, action); finish() }
+        fun round(color: Int) = GradientDrawable().apply { setColor(color); cornerRadius = 999f }
+        fun button(label: String, bg: Int, h: Int, onClick: () -> Unit) = Button(this).apply {
+            text = label; textSize = 17f; setTextColor(Color.WHITE); background = round(bg); isAllCaps = false
+            stateListAnimator = null; minWidth = 0; minimumWidth = 0; setPadding(0, 0, 0, 0)
+            layoutParams = LinearLayout.LayoutParams(0, (h * dp).toInt(), 1f).apply { val m = (5 * dp).toInt(); setMargins(m, 0, m, 0) }
+            setOnClickListener { onClick(); finish() }
         }
+        fun row(vararg bs: Button) = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+                .apply { topMargin = (12 * dp).toInt() }
+            bs.forEach { addView(it) }
+        }
+        val gray = Color.parseColor("#27272a")
+        fun snooze(label: String, mins: Int) = button(label, gray, 56) { Alarm.answer(applicationContext, "snooze", mins) }
         setContentView(LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER
             setBackgroundColor(Color.parseColor("#09090b"))
-            val pad = (32 * dp).toInt(); setPadding(pad, pad, pad, pad)
+            val pad = (24 * dp).toInt(); setPadding(pad, pad, pad, pad)
             addView(text("⏰", 72f, Color.parseColor("#f59e0b")))
             addView(text("Alarm", 32f, Color.WHITE, true))
             addView(text("${Alarm.from} is trying to wake you", 18f, Color.parseColor("#a1a1aa")))
-            addView(LinearLayout(context).apply { minimumHeight = (32 * dp).toInt() })
-            addView(button("Snooze 5 min", Color.parseColor("#27272a"), "snooze"))
-            addView(button("Dismiss", Color.parseColor("#8b5cf6"), "dismiss"))
+            addView(LinearLayout(context).apply { minimumHeight = (28 * dp).toInt() })
+            addView(text("Snooze", 14f, Color.parseColor("#71717a")))
+            addView(row(snooze("5 min", 5), snooze("10 min", 10)))
+            addView(row(snooze("30 min", 30), snooze("1 h", 60)))
+            addView(row(button("Dismiss", Color.parseColor("#8b5cf6"), 64) { Alarm.answer(applicationContext, "dismiss") })
+                .apply { (layoutParams as LinearLayout.LayoutParams).topMargin = (26 * dp).toInt() })
         })
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {}  // snooze or dismiss, not back
