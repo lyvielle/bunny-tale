@@ -18,6 +18,7 @@ It is the sibling of *Bunny Interactive* (the file-manager web client) and share
 - Replies (also by swiping), hearts, delete own messages, nicknames, link previews and tap-to-load embeds
 - Message sound while the app is open (per-device switch in Settings)
 - Opt-in web push notifications (own VAPID / RFC 8291 implementation, no third-party SDK)
+- Leave chat (Settings): sign out on all devices and leave the member list (alarm targets); messages stay
 - Alarms: wake another member ("Send alarm" in the attach menu, 30 s cooldown). It rings full screen in the Android app, or in the browser when they have no app; snooze (5 min, 10 min, 30 min or 1 h), dismiss and timeout (1:30) are posted to the chat
 - "Wipe chat" for any user, automatic wipe after inactivity
 - Optional fake "502 Bad Gateway" screen, opened by tapping its icon three times

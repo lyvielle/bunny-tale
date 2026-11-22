@@ -251,6 +251,22 @@ def stay_forget(tok):
             _save(d)
 
 
+def stay_forget_account(email):
+    """Forget every "stay signed in" of this account, on all devices."""
+    with _store_lock:
+        d, keep = _load(), {}
+        for h, v in d.items():
+            try:
+                if json.loads(fernet().decrypt(v["c"].encode()))["email"].lower() == email.lower():
+                    AUTO.pop(h, None)
+                    continue
+            except (InvalidToken, ValueError, KeyError):
+                pass
+            keep[h] = v
+        if len(keep) != len(d):
+            _save(keep)
+
+
 def auto_login(bad_sid=None):
     """New browser session from this browser's 'bc_rt' cookie (stored credentials); None if not possible."""
     tok = request.cookies.get("bc_rt")
@@ -2422,6 +2438,17 @@ function settings(){
   if(!r.ok){toast('Could not change this setting');return !on}
   ME.gate=on;return on;
  }));
+ const lr=el('div','srow'),lt=el('div','tx'),lb=el('button','btn ghost sm danger','Leave');lb.type='button';
+ lt.appendChild(el('b','','Leave chat'));lt.appendChild(el('span','ds','Sign out everywhere and remove this account from the members, so it no longer shows up for alarms. Its messages stay. Signing in again rejoins.'));
+ lr.appendChild(lt);lr.appendChild(lb);c.appendChild(lr);
+ lb.onclick=async()=>{
+  if(!await confirmBox('Leave the chat?','This account is signed out on all devices and removed from the member list.','Leave'))return;
+  const r=await fetch('/leave',{method:'POST'});
+  if(r.status===401)return relogin();
+  if(!r.ok)return toast(await r.text()||'Could not leave the chat');
+  try{localStorage.removeItem('fcmTok')}catch(_){}
+  location.href='/login';
+ };
  const a=el('div','macts'),done=el('button','btn ghost','Done');done.type='button';done.onclick=close;a.appendChild(done);
  const w=el('div','srow');w.appendChild(a);w.style.justifyContent='flex-end';c.appendChild(w);
  o.onclick=e=>{if(e.target===o)close()};addEventListener('keydown',k);o.appendChild(c);document.body.appendChild(o);
@@ -3163,6 +3190,36 @@ def presence():  # heartbeat: is this page in front of the user? (pushes only go
         return fail(e)
     pres_set(str(j.get("cid", ""))[:64], uid, j.get("visible"), j.get("app") if "app" in j else None)
     return "", 204
+
+
+@app.route("/leave", methods=["POST"])
+def leave():
+    """Sign out and leave the chat: no longer a member (alarm list), no devices, no nickname. Messages stay."""
+    s = auth()
+    if not s:
+        return "", 401
+    try:
+        uid = uid_of(s["email"])
+    except Exception as e:
+        return fail(e)
+    with conn() as c:
+        for t in ("members", "push", "nicks"):
+            c.execute(f"DELETE FROM {t} WHERE uid=?", (uid,))
+    with _alock:
+        for k in [k for k, a in ALARMS.items() if a["to"] == uid or a["frm"] == uid]:
+            ALARMS.pop(k)["state"] = "done"
+    with _slock:
+        for k in [k for k, p in PRES.items() if p["uid"] == uid]:
+            PRES.pop(k)
+    print(f"[auth] {who(s['email'])} left the chat", flush=True)
+    email = s["email"]
+    for sid in [k for k, v in SESS.items() if v["email"] == email]:  # every device of this account is signed out
+        release(sid)
+    session.pop("sid", None)
+    stay_forget_account(email)
+    resp = Response("", 204)
+    resp.delete_cookie("bc_rt")
+    return resp
 
 
 # ---- alarms ----
