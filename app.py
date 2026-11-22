@@ -692,8 +692,8 @@ _fcm_lock = threading.Lock()
 def fcm_sa():
     if _fcm["sa"] is None:
         raw = FCM_SA
-        if raw and not raw.startswith("{") and os.path.exists(raw):
-            raw = open(raw).read()
+        if raw and not raw.startswith("{"):
+            raw = open(raw).read() if os.path.exists(raw) else base64.b64decode(raw + "=" * (-len(raw) % 4)).decode("utf-8", "replace")
         try:
             _fcm["sa"] = json.loads(raw) if raw else {}
         except ValueError:
