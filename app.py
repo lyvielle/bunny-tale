@@ -678,7 +678,7 @@ def push_ok_endpoint(url):
 def push_send(sub, payload):
     u = urlparse(sub["endpoint"])
     r = requests.post(sub["endpoint"], data=push_encrypt(sub, payload), timeout=15, headers={
-        "Content-Encoding": "aes128gcm", "Content-Type": "application/octet-stream", "TTL": "3600", "Urgency": "normal",
+        "Content-Encoding": "aes128gcm", "Content-Type": "application/octet-stream", "TTL": "3600", "Urgency": "high",
         "Authorization": f"vapid t={vapid_jwt(f'{u.scheme}://{u.netloc}')}, k={vapid()[1]}"})
     return r.status_code
 
