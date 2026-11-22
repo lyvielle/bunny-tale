@@ -755,6 +755,10 @@ def fcm_token():
 def fcm_send(token, data, ttl=3600):
     """Data-only, high-priority message: the app builds the notification itself, so it also works when the app is closed.
     Returns the HTTP status, or 0 when the request could not be made at all."""
+    bad = [k for k in data if k in ("from", "notification", "message_type") or k.startswith(("google", "gcm"))]
+    if bad:  # FCM rejects the whole message (400) for reserved data keys
+        print(f"[fcm] reserved data key(s) {bad}, not sent", flush=True)
+        return 400
     try:
         r = requests.post(f"https://fcm.googleapis.com/v1/projects/{fcm_sa()['project_id']}/messages:send", timeout=15,
                           headers={"Authorization": f"Bearer {fcm_token()}"},
@@ -895,7 +899,7 @@ def alarm_ring(a):
 
 
 def alarm_deliver(a, ring):
-    data = {"type": "alarm", "id": a["id"], "tok": a["tok"], "from": a["frm_name"], "ring": ring, "secs": ALARM_RING}
+    data = {"type": "alarm", "id": a["id"], "tok": a["tok"], "who": a["frm_name"], "ring": ring, "secs": ALARM_RING}
     sent = 0
     devs = push_devices(a["to"])
     if fcm_on():

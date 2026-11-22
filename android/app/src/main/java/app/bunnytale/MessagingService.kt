@@ -17,7 +17,7 @@ class MessagingService : FirebaseMessagingService() {
         Log.i("BunnyTale", "FCM ${d["type"]} (priority ${m.priority}/${m.originalPriority})")
         when (d["type"]) {
             "alarm" -> Alarm.start(applicationContext, d["id"] ?: return, d["tok"] ?: return, d["ring"] ?: "1",
-                d["from"] ?: "Someone", d["secs"]?.toIntOrNull() ?: 90)
+                d["who"] ?: "Someone", d["secs"]?.toIntOrNull() ?: 90)
             "alarm_stop" -> Alarm.stop(applicationContext, d["id"])
             else -> message(d["title"], d["body"])
         }
