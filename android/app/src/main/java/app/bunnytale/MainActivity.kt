@@ -3,24 +3,34 @@ package app.bunnytale
 import android.Manifest
 import android.annotation.SuppressLint
 import android.app.AlertDialog
+import android.app.DownloadManager
 import android.app.NotificationManager
 import android.content.ClipData
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.Bitmap
+import android.graphics.Color
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.Environment
 import android.provider.MediaStore
 import android.provider.Settings
+import android.view.View
+import android.view.ViewGroup
 import android.webkit.CookieManager
 import android.webkit.JavascriptInterface
+import android.webkit.MimeTypeMap
 import android.webkit.PermissionRequest
+import android.webkit.URLUtil
 import android.webkit.ValueCallback
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import android.widget.FrameLayout
+import android.widget.Toast
 import androidx.activity.OnBackPressedCallback
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
@@ -28,6 +38,9 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import com.google.firebase.messaging.FirebaseMessaging
 import java.io.File
 
@@ -40,6 +53,9 @@ class MainActivity : AppCompatActivity() {
     private var chooser: ValueCallback<Array<Uri>>? = null
     private var micRequest: PermissionRequest? = null
     private var camFiles: List<Pair<File, Uri>> = emptyList()  // where the camera was asked to save a photo / video
+    private var full: View? = null  // a video in full screen
+    private var fullCb: WebChromeClient.CustomViewCallback? = null
+    private var pendingDl: (() -> Unit)? = null  // Android 8/9: a download waiting for the storage permission
     private val pick = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { r -> deliverFiles(r.resultCode, r.data) }
     // "Attach media": the system photo / video picker only (falls back to the document picker on old phones)
     private val pickMedia = registerForActivityResult(ActivityResultContracts.PickMultipleVisualMedia(10)) { deliverUris(it) }
@@ -66,11 +82,27 @@ class MainActivity : AppCompatActivity() {
             // WebView writes cookies to disk only every ~30 s: save the login right away, phones kill apps quickly
             override fun onPageFinished(v: WebView, url: String) { CookieManager.getInstance().flush() }
         }
+        // file chips ("?dl=1" links): WebView ignores downloads unless the app handles them
+        web.setDownloadListener { url, _, disp, mime, _ -> download(url, URLUtil.guessFileName(url, disp, mime)) }
         web.webChromeClient = object : WebChromeClient() {
             override fun onShowFileChooser(v: WebView, cb: ValueCallback<Array<Uri>>, p: FileChooserParams): Boolean {
                 chooser?.onReceiveValue(null); chooser = cb
                 return try { launchPicker(p); true } catch (e: Exception) { chooser = null; false }
             }
+            // the video's full-screen button only appears (and works) when the app shows the view WebView hands over
+            override fun onShowCustomView(view: View, cb: CustomViewCallback) {
+                if (full != null) { cb.onCustomViewHidden(); return }
+                full = view; fullCb = cb
+                view.setBackgroundColor(Color.BLACK)
+                (window.decorView as FrameLayout).addView(view, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+                WindowCompat.getInsetsController(window, window.decorView).apply {
+                    systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+                    hide(WindowInsetsCompat.Type.systemBars())
+                }
+            }
+            override fun onHideCustomView() { exitFull() }
+            // WebView paints a grey play-button poster over videos without a poster image; a transparent one shows the first frame
+            override fun getDefaultVideoPoster(): Bitmap = Bitmap.createBitmap(1, 1, Bitmap.Config.ARGB_8888)
             override fun onPermissionRequest(r: PermissionRequest) {
                 runOnUiThread {
                     if (PermissionRequest.RESOURCE_AUDIO_CAPTURE in r.resources &&
@@ -82,7 +114,7 @@ class MainActivity : AppCompatActivity() {
             }
         }
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
-            override fun handleOnBackPressed() { if (web.canGoBack()) web.goBack() else finish() }
+            override fun handleOnBackPressed() { if (full != null) exitFull() else if (web.canGoBack()) web.goBack() else finish() }
         })
         if (Build.VERSION.SDK_INT >= 33 &&
             ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED)
@@ -92,6 +124,43 @@ class MainActivity : AppCompatActivity() {
             File(cacheDir, "camera").listFiles()?.forEach { it.delete() }  // photos from earlier sessions were uploaded or dropped
             web.loadUrl(BuildConfig.SERVER_URL.ifEmpty { "about:blank" })
         } else web.restoreState(savedInstanceState)
+    }
+
+    private fun exitFull() {
+        val v = full ?: return
+        full = null
+        (window.decorView as FrameLayout).removeView(v)
+        WindowCompat.getInsetsController(window, window.decorView).show(WindowInsetsCompat.Type.systemBars())
+        fullCb?.onCustomViewHidden(); fullCb = null
+    }
+
+    /** Saves a chat file with the login cookie: photos to Pictures, videos to Movies (both show in the gallery), the rest to Downloads. */
+    private fun download(url: String, name: String) {
+        if (Build.VERSION.SDK_INT < 29 && ContextCompat.checkSelfPermission(this, Manifest.permission.WRITE_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED) {
+            pendingDl = { download(url, name) }
+            ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.WRITE_EXTERNAL_STORAGE), 10)
+            return
+        }
+        try {
+            val safe = name.replace(Regex("[\\u0000-\\u001f/\\\\:*?\"<>|]"), "_").trim().ifEmpty { "file" }.take(120)
+            val mime = MimeTypeMap.getSingleton().getMimeTypeFromExtension(safe.substringAfterLast('.', "").lowercase())
+            val dir = when {
+                mime?.startsWith("image/") == true -> Environment.DIRECTORY_PICTURES
+                mime?.startsWith("video/") == true -> Environment.DIRECTORY_MOVIES
+                else -> Environment.DIRECTORY_DOWNLOADS
+            }
+            val req = DownloadManager.Request(Uri.parse(url))
+                .addRequestHeader("Cookie", CookieManager.getInstance().getCookie(url) ?: "")
+                .addRequestHeader("User-Agent", web.settings.userAgentString)
+                .setTitle(safe)
+                .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
+                .setDestinationInExternalPublicDir(dir, if (dir == Environment.DIRECTORY_DOWNLOADS) safe else "Bunny Tale/$safe")
+            if (mime != null) req.setMimeType(mime)
+            getSystemService(DownloadManager::class.java).enqueue(req)
+            Toast.makeText(this, "Downloading $safe", Toast.LENGTH_SHORT).show()
+        } catch (e: Exception) {
+            Toast.makeText(this, "Download failed", Toast.LENGTH_SHORT).show()
+        }
     }
 
     /** Android 14+: full-screen alarms need a special permission, granted in the system settings. Asked once. */
@@ -184,6 +253,11 @@ class MainActivity : AppCompatActivity() {
         }
 
         @JavascriptInterface
+        fun download(url: String, name: String) {  // long-press on a photo / video in the chat
+            if (url.startsWith(BuildConfig.SERVER_URL)) runOnUiThread { this@MainActivity.download(url, name) }
+        }
+
+        @JavascriptInterface
         fun setMessages(on: Boolean) {  // remembered for a token refresh while the app is closed
             getSharedPreferences("app", MODE_PRIVATE).edit().putBoolean("msgs", on).apply()
         }
@@ -209,6 +283,11 @@ class MainActivity : AppCompatActivity() {
         if (req == 8) {
             val r = micRequest; micRequest = null
             if (results.firstOrNull() == PackageManager.PERMISSION_GRANTED) r?.grant(r.resources) else r?.deny()
+        }
+        if (req == 10) {
+            val d = pendingDl; pendingDl = null
+            if (results.firstOrNull() == PackageManager.PERMISSION_GRANTED) d?.invoke()
+            else Toast.makeText(this, "Saving needs the storage permission", Toast.LENGTH_SHORT).show()
         }
     }
 

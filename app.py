@@ -1525,9 +1525,9 @@ scroller.addEventListener('scroll',()=>{stick=scroller.scrollHeight-scroller.scr
 pill.onclick=toBottom;
 
 /* ---- dialogs ---- */
-function confirmBox(title,text,ok){
+function confirmBox(title,text,ok,cls){
  return new Promise(res=>{
-  const o=el('div','modal'),c=el('div','mcard'),a=el('div','macts'),no=el('button','btn ghost','Cancel'),yes=el('button','btn red',ok);
+  const o=el('div','modal'),c=el('div','mcard'),a=el('div','macts'),no=el('button','btn ghost','Cancel'),yes=el('button','btn '+(cls==null?'red':cls),ok);
   no.type=yes.type='button';
   const k=e=>{if(e.key==='Escape')done(false)};
   const done=v=>{o.remove();removeEventListener('keydown',k);res(v)};
@@ -1539,7 +1539,7 @@ function confirmBox(title,text,ok){
 }
 
 /* ---- image viewer: wheel zoom at the cursor, drag to move, double-click, pinch ---- */
-function lightbox(url){
+function lightbox(url,name){
  const o=el('div','lb'),i=el('img'),x=el('button','btn ghost sm lbx');x.type='button';x.appendChild(svg('x'));
  o.appendChild(i);o.appendChild(x);document.body.appendChild(o);
  let s=1,fit=1,tx=0,ty=0,nw=0,nh=0,moved=0,pd=0;const P=new Map();
@@ -1551,7 +1551,7 @@ function lightbox(url){
  const pos=e=>{const r=o.getBoundingClientRect();return [e.clientX-r.left,e.clientY-r.top]};
  const k=e=>{if(e.key==='Escape')close()},close=()=>{o.remove();removeEventListener('keydown',k);removeEventListener('resize',onr)};
  const onr=()=>{if(nw){const z=s/fit;center();if(z>1.001)zoomAt(o.clientWidth/2,o.clientHeight/2,fit*z)}};
- i.draggable=false;
+ i.draggable=false;i.dataset.n=name||'';
  i.onload=()=>{nw=i.naturalWidth;nh=i.naturalHeight;i.style.width=nw+'px';i.style.height=nh+'px';center()};
  i.src=url;
  o.addEventListener('wheel',e=>{e.preventDefault();const [cx,cy]=pos(e),d=e.deltaMode===1?e.deltaY*16:e.deltaY;zoomAt(cx,cy,s*Math.exp(-d*.0015))},{passive:false});
@@ -1607,8 +1607,9 @@ function linkify(node,text){
 }
 function media(a){
  const url='/media/'+a.r,box=el('div','att');
- if(a.k==='image'){const i=el('img');i.loading='lazy';i.alt=a.n;i.src=url;i.onload=()=>{if(stick)toBottom()};i.onclick=()=>lightbox(url);box.appendChild(i)}
- else if(a.k==='video'){const v=el('video');v.controls=true;v.preload='metadata';v.playsInline=true;v.src=url;v.onloadedmetadata=()=>{if(stick)toBottom()};box.appendChild(v)}
+ if(a.k==='image'){const i=el('img');i.loading='lazy';i.alt=a.n;i.dataset.n=a.n;i.src=url;i.onload=()=>{if(stick)toBottom()};i.onclick=()=>lightbox(url,a.n);box.appendChild(i)}
+ else if(a.k==='video'){const v=el('video');v.controls=true;v.preload='metadata';v.playsInline=true;v.dataset.n=a.n;
+  v.src=url+(window.BunnyApp?'#t=0.1':''); /* the app's WebView shows no first frame until something seeks into the video */v.onloadedmetadata=()=>{if(stick)toBottom()};box.appendChild(v)}
  else if(a.k==='audio'){const u=el('audio');u.controls=true;u.preload='none';u.src=url;fixDur(u);box.appendChild(u)}
  else{const l=el('a','fchip');l.href=url+'?dl=1&n='+encodeURIComponent(a.n);l.appendChild(svg('file'));l.appendChild(el('span','nm',a.n));l.appendChild(el('span','sz',human(a.z||0)));l.appendChild(svg('download'));box.appendChild(l)}
  return box;
@@ -1960,6 +1961,22 @@ msgs.addEventListener('touchmove',e=>{
 msgs.addEventListener('touchend',()=>{clearTimeout(lp.t);swEnd(true)});
 msgs.addEventListener('touchcancel',()=>{clearTimeout(lp.t);swEnd(false)});
 msgs.addEventListener('contextmenu',e=>{if(coarse()&&e.target.closest('.mrow.own'))e.preventDefault()});
+if(window.BunnyApp&&BunnyApp.download){ // the app has no browser menu: long-press a photo or video to save it
+ const dl={t:0,x:0,y:0},pick=e=>e.target.closest&&e.target.closest('.att img,.att video,.lb img');
+ const stop=()=>{clearTimeout(dl.t);dl.t=0};
+ document.addEventListener('touchstart',e=>{stop();const m=e.touches.length===1&&pick(e);if(!m)return;
+  const u=new URL(m.currentSrc||m.src,location.href);if(u.origin!==location.origin||!u.pathname.startsWith('/media/'))return;
+  dl.x=e.touches[0].clientX;dl.y=e.touches[0].clientY;
+  dl.t=setTimeout(async()=>{dl.t=0;if(navigator.vibrate)try{navigator.vibrate(15)}catch(_){}
+   const n=m.dataset.n||u.pathname.slice(7),vid=m.tagName==='VIDEO';
+   if(await confirmBox(vid?'Save video?':'Save photo?',n,'Download',''))
+    BunnyApp.download(u.origin+u.pathname+'?dl=1&n='+encodeURIComponent(n),n);
+  },550);
+ },{passive:true,capture:true});
+ document.addEventListener('touchmove',e=>{if(dl.t&&(e.touches.length>1||Math.hypot(e.touches[0].clientX-dl.x,e.touches[0].clientY-dl.y)>10))stop()},{passive:true,capture:true});
+ document.addEventListener('touchend',stop,true);document.addEventListener('touchcancel',stop,true);
+ document.addEventListener('contextmenu',e=>{if(pick(e))e.preventDefault()},true);
+}
 let lastTap={id:0,t:0};
 msgs.addEventListener('click',e=>{
  const row=e.target.closest('.mrow');if(!row)return;
