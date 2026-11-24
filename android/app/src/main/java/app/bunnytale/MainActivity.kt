@@ -22,10 +22,13 @@ import android.webkit.CookieManager
 import android.webkit.JavascriptInterface
 import android.webkit.MimeTypeMap
 import android.webkit.PermissionRequest
+import android.webkit.ServiceWorkerClient
+import android.webkit.ServiceWorkerController
 import android.webkit.URLUtil
 import android.webkit.ValueCallback
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
@@ -81,7 +84,12 @@ class MainActivity : AppCompatActivity() {
             }
             // WebView writes cookies to disk only every ~30 s: save the login right away, phones kill apps quickly
             override fun onPageFinished(v: WebView, url: String) { CookieManager.getInstance().flush() }
+            override fun shouldInterceptRequest(v: WebView, r: WebResourceRequest): WebResourceResponse? = ShareInbox.intercept(applicationContext, r.url)
         }
+        // the page's service worker is in front of its fetches: shared files must be answered there too
+        ServiceWorkerController.getInstance().setServiceWorkerClient(object : ServiceWorkerClient() {
+            override fun shouldInterceptRequest(r: WebResourceRequest): WebResourceResponse? = ShareInbox.intercept(applicationContext, r.url)
+        })
         // file chips ("?dl=1" links): WebView ignores downloads unless the app handles them
         web.setDownloadListener { url, _, disp, mime, _ -> download(url, URLUtil.guessFileName(url, disp, mime)) }
         web.webChromeClient = object : WebChromeClient() {
@@ -122,8 +130,15 @@ class MainActivity : AppCompatActivity() {
         askFullScreen()
         if (savedInstanceState == null) {
             File(cacheDir, "camera").listFiles()?.forEach { it.delete() }  // photos from earlier sessions were uploaded or dropped
+            ShareInbox.take(this, intent)  // opened from the share sheet: the chat picks it up when it loads
             web.loadUrl(BuildConfig.SERVER_URL.ifEmpty { "about:blank" })
         } else web.restoreState(savedInstanceState)
+    }
+
+    /** Shared while the app was already running (singleTask): hand it to the open chat right away. */
+    override fun onNewIntent(i: Intent) {
+        super.onNewIntent(i)
+        if (ShareInbox.take(this, i)) web.evaluateJavascript("window.__shared&&window.__shared()", null)
     }
 
     private fun exitFull() {
@@ -256,6 +271,9 @@ class MainActivity : AppCompatActivity() {
         fun download(url: String, name: String) {  // long-press on a photo / video in the chat
             if (url.startsWith(BuildConfig.SERVER_URL)) runOnUiThread { this@MainActivity.download(url, name) }
         }
+
+        @JavascriptInterface
+        fun takeShared(): String = ShareInbox.forPage()
 
         @JavascriptInterface
         fun setMessages(on: Boolean) {  // remembered for a token refresh while the app is closed

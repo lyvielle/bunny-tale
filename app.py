@@ -2541,25 +2541,39 @@ if(ME.gate){
  if(j.lock>0)lockInput(j.lock);
  takeShared();
 })();
-/* files / text shared to the app from the system share sheet: the service worker parks them in the cache, they land in the composer here */
+/* files / text shared from the system share sheet land in the composer here.
+   Browser: the service worker parks them in its cache (name = C in SW_JS). App: the bridge says what was shared and
+   serves the files itself at /__appshare/<i>. */
+function putShared(text,fs){
+ if(text){ta.value=ta.value?ta.value+'\n'+text:text;ta.dispatchEvent(new Event('input'))}
+ if(fs.length)addFiles(fs);
+ upd();
+}
 async function takeShared(){
  try{
+  if(window.BunnyApp&&BunnyApp.takeShared){
+   const s=BunnyApp.takeShared();if(!s)return;
+   const meta=JSON.parse(s),fs=[],k=Date.now();
+   for(let i=0;i<meta.files.length;i++){const f=meta.files[i];
+    try{const r=await fetch('/__appshare/'+i+'?k='+k,{cache:'no-store'});if(r.ok){const b=await r.blob();fs.push(new File([b],f.n||'file',{type:f.t||b.type}))}}catch(_){}}
+   if(fs.length<meta.files.length)toast('Some shared files could not be read');
+   putShared(meta.text,fs);return;
+  }
   if(!window.caches)return;
-  const c=await caches.open('bunnychat-v2'),mr=await c.match('/__share/meta');
+  const c=await caches.open('bunnychat-v3'),mr=await c.match('/__share/meta');
   if(!mr)return;
   const meta=await mr.json(),fs=[];
   for(let i=0;i<meta.n;i++){const r=await c.match('/__share/'+i);if(r){const b=await r.blob();fs.push(new File([b],decodeURIComponent(r.headers.get('x-name')||'file'),{type:b.type}))}}
   await c.delete('/__share/meta');for(let i=0;i<meta.n;i++)await c.delete('/__share/'+i);
   try{history.replaceState(null,'','/')}catch(_){}
-  if(meta.text){ta.value=ta.value?ta.value+'\n'+meta.text:meta.text;ta.dispatchEvent(new Event('input'))}
-  if(fs.length)addFiles(fs);
-  upd();
+  putShared(meta.text,fs);
  }catch(_){}
 }
+window.__shared=takeShared; // the app calls this when something is shared while the chat is already open
 })();
 """
 
-SW_JS = r"""const C = 'bunnychat-v3', OFF = '/offline';
+SW_JS = r"""const C = 'bunnychat-v3', OFF = '/offline'; // takeShared() in CHAT_JS opens this cache by name
 self.addEventListener('install', e => e.waitUntil(caches.open(C).then(c => c.add(OFF)).then(() => self.skipWaiting())));
 self.addEventListener('activate', e => e.waitUntil(caches.keys().then(ks => Promise.all(ks.filter(k => k !== C).map(k => caches.delete(k)))).then(() => self.clients.claim())));
 self.addEventListener('fetch', e => {
