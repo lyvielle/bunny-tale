@@ -276,6 +276,9 @@ class MainActivity : AppCompatActivity() {
         fun takeShared(): String = ShareInbox.forPage()
 
         @JavascriptInterface
+        fun sharedDone() = ShareInbox.done()
+
+        @JavascriptInterface
         fun setMessages(on: Boolean) {  // remembered for a token refresh while the app is closed
             getSharedPreferences("app", MODE_PRIVATE).edit().putBoolean("msgs", on).apply()
         }

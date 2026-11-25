@@ -21,7 +21,7 @@ It is the sibling of *Bunny Interactive* (the file-manager web client) and share
 - Leave chat (Settings): sign out on all devices and leave the member list (alarm targets); messages stay
 - Alarms: wake another member ("Send alarm" in the attach menu, 30 s cooldown). It rings full screen in the Android app, or in the browser when they have no app; snooze (5 min, 10 min, 30 min or 1 h), dismiss and timeout (1:30) are posted to the chat
 - "Wipe chat" for any user, automatic wipe after inactivity
-- Optional fake "502 Bad Gateway" screen, opened by tapping its icon three times
+- Optional fake "502 Bad Gateway" screen, opened by tapping the left side, then the right side, then holding the icon
 - Installable PWA (manifest, service worker, offline page)
 
 ## How it works

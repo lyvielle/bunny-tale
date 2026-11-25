@@ -43,13 +43,15 @@ object ShareInbox {
         }
     } catch (_: Exception) { null } ?: u.lastPathSegment?.substringAfterLast('/') ?: "file"
 
-    /** For the page: {"text": "...", "files": [{"n": name, "t": mime}]}, or "" when nothing new was shared. */
+    /** For the page: {"text": "...", "files": [{"n": name, "t": mime}]}, or "" when nothing new was shared.
+     *  Stays fresh until the page calls done(): the chat may reload into the fake error screen while fetching. */
     fun forPage(): String {
         if (!fresh) return ""
-        fresh = false
         return JSONObject().put("text", text)
             .put("files", JSONArray(items.map { JSONObject().put("n", it.name).put("t", it.mime) })).toString()
     }
+
+    fun done() { fresh = false }
 
     /** Answers /__appshare/<i> on our server's origin, from both the WebView and its service worker. */
     fun intercept(ctx: Context, url: Uri): WebResourceResponse? {

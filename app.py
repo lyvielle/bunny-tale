@@ -2449,7 +2449,7 @@ function settings(){
    b.onclick=()=>{setGifSource(s);GPS.forEach(x=>bs[x].className=x===s?'btn sm':'btn ghost sm')};gb.appendChild(b)});
   gr.appendChild(gb);gr.appendChild(el('span','ds','Where the GIF picker gets its GIFs, on this device only.'));c.appendChild(gr);
  }
- c.appendChild(switchRow('Fake error screen','Show a fake "502 Bad Gateway" page whenever this device opens the app. Tap its icon 3 times to continue.',!!ME.gate,async on=>{
+ c.appendChild(switchRow('Fake error screen','Show a fake "502 Bad Gateway" page whenever this device opens the app. To continue: tap the left side, then the right side, then hold the icon.',!!ME.gate,async on=>{
   const r=await fetch('/gate/setting',{method:'POST',headers:JH,body:JSON.stringify({on})});
   if(r.status===401){relogin();return !on}
   if(!r.ok){toast('Could not change this setting');return !on}
@@ -2549,7 +2549,9 @@ function putShared(text,fs){
  if(fs.length)addFiles(fs);
  upd();
 }
+let sharing=false;
 async function takeShared(){
+ if(sharing)return;sharing=true;
  try{
   if(window.BunnyApp&&BunnyApp.takeShared){
    const s=BunnyApp.takeShared();if(!s)return;
@@ -2557,7 +2559,9 @@ async function takeShared(){
    for(let i=0;i<meta.files.length;i++){const f=meta.files[i];
     try{const r=await fetch('/__appshare/'+i+'?k='+k,{cache:'no-store'});if(r.ok){const b=await r.blob();fs.push(new File([b],f.n||'file',{type:f.t||b.type}))}}catch(_){}}
    if(fs.length<meta.files.length)toast('Some shared files could not be read');
-   putShared(meta.text,fs);return;
+   putShared(meta.text,fs);
+   if(BunnyApp.sharedDone)BunnyApp.sharedDone(); // only now: a reload in between (fake error screen) keeps the share for the next page
+   return;
   }
   if(!window.caches)return;
   const c=await caches.open('bunnychat-v3'),mr=await c.match('/__share/meta');
@@ -2567,7 +2571,7 @@ async function takeShared(){
   await c.delete('/__share/meta');for(let i=0;i<meta.n;i++)await c.delete('/__share/'+i);
   try{history.replaceState(null,'','/')}catch(_){}
   putShared(meta.text,fs);
- }catch(_){}
+ }catch(_){}finally{sharing=false}
 }
 window.__shared=takeShared; // the app calls this when something is shared while the chat is already open
 })();
@@ -2630,7 +2634,7 @@ GATE_HTML = """<!doctype html><html lang=en><meta charset=utf-8><meta name=viewp
 html,body{height:100%;margin:0}
 body{display:flex;align-items:center;justify-content:center;background:#f5f6f8;color:#1f2937;font:16px/1.55 system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;text-align:center;padding:24px;box-sizing:border-box}
 .box{max-width:480px;width:100%}
-#i{width:112px;height:112px;margin:0 auto 18px;display:block;cursor:default;user-select:none;-webkit-user-select:none;-webkit-tap-highlight-color:transparent;touch-action:manipulation}
+#i{width:112px;height:112px;margin:0 auto 18px;display:block;cursor:default;user-select:none;-webkit-user-select:none;-webkit-touch-callout:none;-webkit-tap-highlight-color:transparent;touch-action:manipulation}
 .code{font-size:80px;font-weight:800;color:#dc2626;line-height:1;letter-spacing:-3px}
 h1{font-size:28px;margin:10px 0 14px;font-weight:700}
 p{color:#4b5563;margin:0 0 10px}
@@ -2655,9 +2659,13 @@ button:hover{background:#111827}
 <div class=foot>Error 502 &middot; nginx</div>
 </div>
 <script>
-(function(){var n=0,t,i=document.getElementById('i');
-i.addEventListener('click',function(){n++;clearTimeout(t);t=setTimeout(function(){n=0},1200);
-if(n>=3){n=0;fetch('/gate/pass',{method:'POST'}).then(function(){location.replace('/')})}})})();
+/* unlock: tap the left half, tap the right half, then hold the icon (each step within 3 s) */
+(function(){var s=0,t=0,h,i=document.getElementById('i'),stop=function(){clearTimeout(h)};
+document.addEventListener('contextmenu',function(e){e.preventDefault()});
+document.addEventListener('pointerdown',function(e){var now=Date.now();if(now-t>3000)s=0;t=now;stop();
+if(i.contains(e.target)){if(s===2)h=setTimeout(function(){s=0;fetch('/gate/pass',{method:'POST'}).then(function(){location.replace('/')})},500);else s=0;return}
+s=e.clientX<innerWidth/2?1:(s===1?2:0)});
+document.addEventListener('pointerup',stop);document.addEventListener('pointercancel',stop)})();
 </script></html>"""
 
 
@@ -2679,7 +2687,7 @@ def give_pass(resp):
 
 
 @app.before_request
-def gate():  # optional disguise: pages look like a broken proxy until the icon is tapped 3 times
+def gate():  # optional disguise: pages look like a broken proxy until the secret tap sequence (GATE_HTML)
     if request.method == "GET" and request.path in ("/", "/login") and gate_on():
         if gate_passed():
             g.gate_used = True  # single use: this page load spends the pass
