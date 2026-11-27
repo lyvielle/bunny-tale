@@ -2504,10 +2504,13 @@ const stale=()=>Date.now()-lastEv>40000;
 setInterval(()=>{if(opened&&stale()){st.classList.remove('on');connect()}},10000);
 const wake=()=>{if(opened){if(stale())connect();sync();flushWait=3000;flush()}};
 addEventListener('online',wake);addEventListener('pageshow',wake);
+/* the chat is on screen: its message notifications on this device are read (alarms stay) */
+const clearNotes=()=>{if(!document.hidden&&navigator.serviceWorker)navigator.serviceWorker.getRegistration().then(r=>r&&r.getNotifications({tag:'bunnychat'})).then(ns=>(ns||[]).forEach(n=>n.close())).catch(()=>{})};
+clearNotes();
 document.addEventListener('visibilitychange',()=>{
  if(!document.hidden)appBg=false;
  presence();
- if(!document.hidden)wake();
+ if(!document.hidden){wake();clearNotes()}
 });
 /* size the app to what is really visible; also at load and a few times while mobile browsers settle their viewport */
 function fit(){

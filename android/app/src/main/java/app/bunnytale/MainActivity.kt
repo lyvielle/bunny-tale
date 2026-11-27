@@ -287,6 +287,7 @@ class MainActivity : AppCompatActivity() {
     override fun onResume() {
         super.onResume()
         AppState.foreground = true
+        getSystemService(NotificationManager::class.java).cancel(1)  // the chat is on screen: its message notification is read (alarms use another id)
         web.onResume()
         web.evaluateJavascript("window.__appVis&&window.__appVis(true)", null)
     }
